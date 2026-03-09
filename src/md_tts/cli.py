@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import tempfile
 from pathlib import Path
 from typing import List, Tuple
 from multiprocessing import Pool
@@ -17,11 +16,13 @@ from .tts import build_engine
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 logger = logging.getLogger("md_tts")
+LANGUAGE_AWARE_ENGINES = {"mms", "kokoro", "chatterbox", "cosyvoice"}
 
 
 def process_paragraph(
     para: md_parser.Paragraph,
     engine_name: str,
+    language: str,
     device: str | None,
     cosyvoice_model_dir: Path | None,
     cosyvoice_prompt_wav: Path | None,
@@ -47,6 +48,7 @@ def process_paragraph(
     try:
         engine = build_engine(
             engine_name,
+            language=language,
             device=device,
             cosyvoice_model_dir=cosyvoice_model_dir,
             cosyvoice_prompt_wav=cosyvoice_prompt_wav,
@@ -69,6 +71,7 @@ def process_markdown_file(
     md_file: Path,
     output_dir: Path,
     engine_name: str,
+    language: str,
     pause_ms: int,
     device: str | None,
     cosyvoice_model_dir: Path | None = None,
@@ -97,6 +100,7 @@ def process_markdown_file(
         process_func = partial(
             process_paragraph,
             engine_name=engine_name,
+            language=language,
             device=device,
             cosyvoice_model_dir=cosyvoice_model_dir,
             cosyvoice_prompt_wav=cosyvoice_prompt_wav,
@@ -118,6 +122,7 @@ def process_markdown_file(
             idx, seg = process_paragraph(
                 para,
                 engine_name=engine_name,
+                language=language,
                 device=device,
                 cosyvoice_model_dir=cosyvoice_model_dir,
                 cosyvoice_prompt_wav=cosyvoice_prompt_wav,
@@ -132,10 +137,6 @@ def process_markdown_file(
     # Ordenar segmentos por índice para mantener el orden correcto
     segments.sort(key=lambda x: x[0])
     audio_segments = [seg for _, seg in segments]
-    
-    # Ordenar segmentos por índice para mantener el orden correcto
-    segments.sort(key=lambda x: x[0])
-    audio_segments = [seg for _, seg in segments]
 
     combined = concatenate_with_pause(audio_segments, pause_ms=pause_ms)
     output_path = output_dir / f"{md_file.stem}.wav"
@@ -145,7 +146,7 @@ def process_markdown_file(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Convierte Markdown a audio en español.")
+    parser = argparse.ArgumentParser(description="Convierte Markdown a audio (es/en según motor).")
     repo_root = Path(__file__).resolve().parent.parent.parent
     parser.add_argument(
         "--input-dir",
@@ -164,6 +165,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["mms", "kokoro", "chatterbox", "vibevoice", "cosyvoice"],
         default="mms",
         help="Motor TTS a usar",
+    )
+    parser.add_argument(
+        "--language",
+        choices=["en", "es"],
+        default="es",
+        help="Idioma del TTS cuando el motor lo soporte (default: es)",
     )
     parser.add_argument(
         "--pause-ms",
@@ -211,11 +218,23 @@ def main(argv: List[str] | None = None) -> None:
     if not input_dir.exists():
         raise FileNotFoundError(f"No existe el directorio de entrada: {input_dir}")
 
+    if args.engine not in LANGUAGE_AWARE_ENGINES and args.language != "es":
+        logger.warning(
+            "El engine '%s' no usa --language actualmente; se ignorará '%s'.",
+            args.engine,
+            args.language,
+        )
+    if args.engine == "vibevoice" and args.language == "es":
+        logger.warning(
+            "VibeVoice está optimizado principalmente para inglés; el resultado en español puede degradarse."
+        )
+
     for md_file in md_parser.iter_markdown_files(input_dir):
         out_path = process_markdown_file(
             md_file=md_file,
             output_dir=output_dir,
             engine_name=args.engine,
+            language=args.language,
             pause_ms=args.pause_ms,
             device=args.device,
             cosyvoice_model_dir=args.cosyvoice_model_dir,

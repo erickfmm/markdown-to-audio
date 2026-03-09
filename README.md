@@ -1,91 +1,145 @@
-# Markdown a audio (español)
+# Markdown to Audio (English / Spanish)
 
-Convierte todos los archivos Markdown del directorio `modificacion1/` en audios WAV, dividiendo el texto por secciones (`#`) y párrafos. Cada párrafo se sintetiza con un modelo TTS y se unen los fragmentos con una pausa corta para obtener un solo audio por archivo.
+Convert all Markdown files in `modificacion1/` to WAV audio, splitting text by sections (`#`) and paragraphs. Each paragraph is synthesized with a TTS engine, then fragments are joined with a short pause to generate one audio file per Markdown.
 
-## Modelos soportados
+## Supported Engines
 
-- `mms` → [facebook/mms-tts-spa](https://huggingface.co/facebook/mms-tts-spa) (recomendado, español nativo).
-- `kokoro` → [hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M).
-- `chatterbox` → [ResembleAI/chatterbox](https://huggingface.co/ResembleAI/chatterbox).
-- `vibevoice` → [microsoft/VibeVoice-Realtime-0.5B](https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B) (soporte real vía `transformers` pipeline, necesita GPU para fluidez).
-- `cosyvoice` → [FunAudioLLM/Fun-CosyVoice3-0.5B-2512](https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512) (soporte real si instalas CosyVoice desde su repo; puede usar `--cosyvoice-model-dir` y `--cosyvoice-prompt-wav`).
+- `mms` -> [facebook/mms-tts-spa](https://huggingface.co/facebook/mms-tts-spa) / [facebook/mms-tts-eng](https://huggingface.co/facebook/mms-tts-eng) (recommended).
+- `kokoro` -> [hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M).
+- `chatterbox` -> [ResembleAI/chatterbox](https://huggingface.co/ResembleAI/chatterbox).
+- `vibevoice` -> [microsoft/VibeVoice-Realtime-0.5B](https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B).
+- `cosyvoice` -> [FunAudioLLM/Fun-CosyVoice3-0.5B-2512](https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512) (requires CosyVoice installation from its repo).
 
-Para uso inmediato en español, elija `--engine mms`. `kokoro` y `chatterbox` funcionan, pero sus descargas son pesadas y pueden requerir GPU para buen rendimiento.
+Language behavior:
+- `--language` is applied by `mms`, `kokoro`, `chatterbox` (`language_id`), and `cosyvoice` (language-specific prompt template).
+- `vibevoice` is primarily optimized for English; using `--language es` shows a warning.
 
-## Requisitos
+## Requirements
 
 - Python 3.10+
-- FFmpeg instalado (necesario para `pydub`).
-- Conexión a internet para descargar pesos de los modelos la primera vez.
+- FFmpeg installed (`pydub` dependency)
+- Internet connection the first time to download model weights
 
-## Instalación rápida
+## Quick Install
 
 ```bash
-pip install --upgrade pip
-pip install -e .
+python3 -m pip install --upgrade pip
+python3 -m pip install -e .
 ```
 
-Si falta FFmpeg (Linux/Docker):
+Install FFmpeg on Debian/Ubuntu:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y ffmpeg
 ```
 
-## Uso
+## Usage
 
 ```bash
-# Convierte todos los .md de modificacion1/ usando MMS (español)
-md-tts --input-dir modificacion1 --output-dir output_audio --engine mms --pause-ms 500
+# Spanish with MMS (default language is es)
+md-tts --input-dir modificacion1 --output-dir output_audio --engine mms
 
-# Usar Kokoro (multilingüe), intentando auto-voz
-md-tts --engine kokoro --input-dir modificacion1 --output-dir output_audio_kokoro
+# English with MMS
+md-tts --input-dir modificacion1 --output-dir output_audio_en --engine mms --language en
 
-# Usar Chatterbox (multilingüe) en GPU
-md-tts --engine chatterbox --device cuda
+# Kokoro in Spanish
+md-tts --engine kokoro --language es --input-dir modificacion1 --output-dir output_audio_kokoro_es
 
-# VibeVoice (streaming-ready; requiere GPU para buen rendimiento)
-md-tts --engine vibevoice --device cuda --input-dir modificacion1 --output-dir output_audio_vibe
+# Kokoro in English
+md-tts --engine kokoro --language en --input-dir modificacion1 --output-dir output_audio_kokoro_en
 
-# CosyVoice 3 (requiere instalar CosyVoice desde su repo)
-md-tts --engine cosyvoice --device cuda --cosyvoice-model-dir /ruta/al/modelo \
-  --cosyvoice-prompt-wav ./mi_voz.wav
+# Chatterbox on GPU with language_id
+md-tts --engine chatterbox --device cuda --language en
+
+# Save paragraph fragments and process in parallel
+md-tts --input-dir modificacion1 --output-dir output_audio --save-fragments --engine kokoro --language en --workers 2
+
+# CosyVoice in Spanish (language-specific prompt template is applied)
+md-tts --engine cosyvoice --language es --device cuda --cosyvoice-model-dir /path/to/cosyvoice_model
+
+# How I use it
+uv sync
+uv run md-tts --input-dir modificacion1 --output-dir output_audio --engine kokoro --device cuda --pause-ms 500 --save-fragments --workers 10 --language es
 ```
 
-- Los WAV resultantes se guardan en `--output-dir` con el mismo nombre base del Markdown.
-- `--pause-ms` controla el silencio entre párrafos (por defecto 500 ms).
-- `--device` acepta `cpu` o `cuda` (si está disponible). Algunos modelos requieren GPU para velocidad razonable.
+Notes:
+- Output WAV files are written to `--output-dir` with the same base name as each Markdown file.
+- `--pause-ms` controls silence between paragraphs (default: `500`).
+- `--device` accepts `cpu` or `cuda`.
 
-## Estructura
+## Docker (Linux)
 
+```bash
+docker build -t md-tts .
+docker run --rm -v "$(pwd):/app" md-tts \
+  --input-dir modificacion1 \
+  --output-dir output_audio \
+  --engine kokoro \
+  --language en \
+  --save-fragments \
+  --workers 2
 ```
+
+## Project Structure
+
+```text
 src/md_tts/
-  parser.py       # Divide Markdown en secciones y párrafos
-  tts.py          # Motores TTS (MMS, Kokoro, Chatterbox, VibeVoice, CosyVoice)
-  audio_utils.py  # Conversión y unión de audio
-  cli.py          # Punto de entrada de línea de comandos
-pyproject.toml    # Metadatos y dependencias
-Dockerfile        # Imagen lista para ejecutar
+  parser.py       # Markdown splitting by section/paragraph
+  tts.py          # TTS engines (MMS, Kokoro, Chatterbox, VibeVoice, CosyVoice)
+  audio_utils.py  # Audio conversion and concatenation helpers
+  cli.py          # CLI entrypoint
+pyproject.toml    # Package metadata and dependencies
+Dockerfile        # Container image
 ```
 
-## Notas y limitaciones
+## Limitations
 
-- VibeVoice ahora usa el pipeline de `transformers`; para buena latencia requiere GPU y drivers válidos.
-- CosyVoice necesita instalar su repo (`https://github.com/FunAudioLLM/CosyVoice`) y dependencias (torch, torchaudio, funasr). Puedes apuntar a un modelo ya descargado con `--cosyvoice-model-dir` y dar un prompt de voz con `--cosyvoice-prompt-wav`.
-- Los modelos son pesados; la primera ejecución descargará varios cientos de MB/GB.
-- El proyecto genera WAV (16-bit PCM). Ajusta a otro formato exportando con `pydub` si lo necesitas.
-- El texto se sintetiza en el orden original: encabezado seguido de sus párrafos, separados por silencios.
+- Model downloads are large on first execution.
+- `vibevoice` and some setups benefit strongly from GPU.
+- `cosyvoice` requires its upstream repository and dependencies.
+- `vibevoice` currently behaves best in English; Spanish quality depends on prompt/content and model behavior.
 
-## Docker
+## Model Licenses
+
+Check each model license before production use:
+- facebook/mms-tts-spa / facebook/mms-tts-eng -> CC-BY-NC 4.0 (non-commercial).
+- hexgrad/Kokoro-82M -> Apache 2.0.
+- ResembleAI/chatterbox -> MIT (with watermarking behavior).
+- microsoft/VibeVoice-Realtime-0.5B -> MIT.
+- FunAudioLLM/Fun-CosyVoice3-0.5B-2512 -> Apache 2.0.
+
+---
+
+# Markdown a audio (Español)
+
+Convierte los archivos Markdown de `modificacion1/` en audios WAV, separando por secciones y párrafos.
+
+## Idioma
+
+- `--language` funciona con `mms`, `kokoro`, `chatterbox` (vía `language_id`) y `cosyvoice` (vía plantilla de prompt por idioma).
+- `vibevoice` está optimizado principalmente para inglés; al usar `--language es` se muestra warning.
+- El valor por defecto es `es`.
+
+## Uso rápido
 
 ```bash
-docker build -t md-tts . && docker run --rm -v "%CD%:/app" md-tts --input-dir modificacion1 --output-dir output_audio --save-fragments --engine kokoro --workers 1
+# Español (por defecto)
+md-tts --input-dir modificacion1 --output-dir output_audio --engine mms
+
+# Inglés con MMS
+md-tts --input-dir modificacion1 --output-dir output_audio_en --engine mms --language en
+
+# Kokoro en inglés
+md-tts --engine kokoro --language en --input-dir modificacion1 --output-dir output_audio_kokoro_en
+
+# Cómo lo uso yo personalmente
+uv sync
+uv run md-tts --input-dir modificacion1 --output-dir output_audio --engine kokoro --device cuda --pause-ms 500 --save-fragments --workers 10 --language es
 ```
 
-## Licencias de modelos
+## Docker en Linux
 
-Revisa las licencias de cada modelo antes de uso en producción:
-- facebook/mms-tts-spa → CC-BY-NC 4.0 (no comercial).
-- hexgrad/Kokoro-82M → Apache 2.0.
-- ResembleAI/chatterbox → MIT con watermarking.
-- microsoft/VibeVoice-Realtime-0.5B → MIT (uso responsable, streaming).
-- FunAudioLLM/Fun-CosyVoice3-0.5B-2512 → Apache 2.0.
+```bash
+docker build -t md-tts .
+docker run --rm -v "$(pwd):/app" md-tts --input-dir modificacion1 --output-dir output_audio --engine mms --language es
+```

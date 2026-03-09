@@ -21,17 +21,26 @@ class TtsEngine:
 
 
 @dataclass
-class MmsSpanishEngine(TtsEngine):
+class MmsEngine(TtsEngine):
+    language: str = "es"
     device: str = "cpu"
 
     def __post_init__(self):
         from transformers import AutoTokenizer, VitsModel
         import torch
 
-        self.tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-spa")
-        self.model = VitsModel.from_pretrained("facebook/mms-tts-spa")
+        model_by_language = {
+            "es": "facebook/mms-tts-spa",
+            "en": "facebook/mms-tts-eng",
+        }
+        if self.language not in model_by_language:
+            raise ValueError(f"Idioma no soportado para MMS: {self.language}. Use 'es' o 'en'.")
+
+        model_id = model_by_language[self.language]
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        self.model = VitsModel.from_pretrained(model_id)
         self.model.to(self.device)
-        self.name = "facebook/mms-tts-spa"
+        self.name = model_id
 
     def synthesize(self, text: str) -> AudioSegment:
         import torch
@@ -45,14 +54,17 @@ class MmsSpanishEngine(TtsEngine):
 
 @dataclass
 class KokoroEngine(TtsEngine):
-    lang_code: str = "es"  # Spanish
+    language: str = "es"
     device: Optional[str] = None
 
     def __post_init__(self):
         from kokoro import KPipeline
 
+        if self.language not in {"es", "en"}:
+            raise ValueError(f"Idioma no soportado para Kokoro: {self.language}. Use 'es' o 'en'.")
+
         self.name = "hexgrad/Kokoro-82M"
-        self.pipeline = KPipeline(lang_code=self.lang_code, repo_id=self.name, device=self.device or "cpu")
+        self.pipeline = KPipeline(lang_code=self.language, repo_id=self.name, device=self.device or "cpu")
 
     def synthesize(self, text: str) -> AudioSegment:
         chunks = []
@@ -66,16 +78,32 @@ class KokoroEngine(TtsEngine):
 
 @dataclass
 class ChatterboxEngine(TtsEngine):
+    language: str = "es"
     device: Optional[str] = None
 
     def __post_init__(self):
-        from chatterbox.tts import ChatterboxTTS
+        if self.language not in {"es", "en"}:
+            raise ValueError(f"Idioma no soportado para Chatterbox: {self.language}. Use 'es' o 'en'.")
 
-        self.model = ChatterboxTTS.from_pretrained(device=self.device or "cpu")
-        self.name = "ResembleAI/chatterbox"
+        self.multilingual = False
+        try:
+            from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
+            self.model = ChatterboxMultilingualTTS.from_pretrained(device=self.device or "cpu")
+            self.multilingual = True
+            self.name = "ResembleAI/chatterbox-multilingual"
+        except Exception:
+            from chatterbox.tts import ChatterboxTTS
+
+            # Fallback para versiones sin soporte multilingüe explícito.
+            self.model = ChatterboxTTS.from_pretrained(device=self.device or "cpu")
+            self.name = "ResembleAI/chatterbox"
 
     def synthesize(self, text: str) -> AudioSegment:
-        wav = self.model.generate(text)
+        if self.multilingual:
+            wav = self.model.generate(text, language_id=self.language)
+        else:
+            wav = self.model.generate(text)
         data = wav.cpu().numpy() if hasattr(wav, "cpu") else np.asarray(wav)
         return numpy_to_segment(data.squeeze(), sample_rate=self.model.sr)
 
@@ -107,6 +135,7 @@ class VibeVoiceEngine(TtsEngine):
 
 @dataclass
 class CosyVoiceEngine(TtsEngine):
+    language: str = "es"
     device: Optional[str] = None
     model_dir: Optional[str] = None
     prompt_wav: Optional[str] = None
@@ -129,14 +158,22 @@ class CosyVoiceEngine(TtsEngine):
         self.name = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512"
 
     def synthesize(self, text: str) -> AudioSegment:
-        prompt = self.prompt_wav
-        # fallback a texto simple sin prompt
+        if self.language not in {"es", "en"}:
+            raise ValueError(f"Idioma no soportado para CosyVoice: {self.language}. Use 'es' o 'en'.")
+
+        prompt_text_by_language = {
+            "en": "You are a helpful assistant.<|endofprompt|>Please read naturally in English.",
+            "es": "You are a helpful assistant.<|endofprompt|>Por favor lee de forma natural en español.",
+        }
+        prompt_text = prompt_text_by_language[self.language]
+
+        prompt_wav = self.prompt_wav
         chunks = []
         for _, out in enumerate(
             self.model.inference_zero_shot(
                 text,
-                prompt or "You are a helpful assistant.",
-                prompt or None,
+                prompt_text,
+                prompt_wav,
                 stream=False,
             )
         ):
@@ -150,7 +187,7 @@ class CosyVoiceEngine(TtsEngine):
 
 
 ENGINE_REGISTRY = {
-    "mms": MmsSpanishEngine,
+    "mms": MmsEngine,
     "kokoro": KokoroEngine,
     "chatterbox": ChatterboxEngine,
     "vibevoice": VibeVoiceEngine,
