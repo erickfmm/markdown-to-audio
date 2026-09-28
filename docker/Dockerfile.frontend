@@ -1,0 +1,22 @@
+# Frontend Flask: imagen ligera, solo GUI + proxy (sin torch/transformers)
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN python3 -m pip install --upgrade pip && \
+    python3 -m pip install --no-cache-dir \
+    "flask>=3.0" \
+    "requests>=2.31" \
+    "gunicorn>=21.2"
+
+# Solo el código fuente (PYTHONPATH evita instalar la pila pesada de TTS)
+COPY src /app/src
+ENV PYTHONPATH=/app/src \
+    MD_TTS_API_URL=http://backend:8000
+
+EXPOSE 5000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "--access-logfile", "-", "md_tts.web.app:app"]

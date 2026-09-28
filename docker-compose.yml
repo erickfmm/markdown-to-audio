@@ -1,0 +1,39 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    image: md-tts-backend
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # El audio generado queda en el host
+      - ./output_audio:/app/output_audio
+      # Caché de modelos HuggingFace: sobrevive rebuilds del contenedor
+      - hf-cache:/root/.cache/huggingface
+    environment:
+      MD_TTS_JOBS_DIR: /app/output_audio/web
+    restart: unless-stopped
+    # GPU (requiere NVIDIA Container Toolkit): descomentar la siguiente línea
+    # gpus: all
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    image: md-tts-frontend
+    ports:
+      - "${PORT:-5000}:5000"
+    environment:
+      # En modo híbrido (backend local) se sobreescribe con
+      # MD_TTS_API_URL=http://host.docker.internal:8000
+      MD_TTS_API_URL: ${MD_TTS_API_URL:-http://backend:8000}
+    extra_hosts:
+      # Necesario para que el contenedor alcance al backend local (Linux)
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  hf-cache:

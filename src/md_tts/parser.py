@@ -30,14 +30,13 @@ def _flush_buffer(
     buffer.clear()
 
 
-def split_markdown(file_path: Path) -> List[Paragraph]:
-    """Divide un archivo Markdown en párrafos por secciones (#) y bloques vacíos.
+def split_markdown_text(content: str) -> List[Paragraph]:
+    """Divide el contenido Markdown (texto) en párrafos por secciones (#) y bloques vacíos.
 
     - Cada encabezado se incluye como un párrafo independiente (para anunciar la sección).
     - Los párrafos se separan por líneas en blanco.
     """
 
-    content = file_path.read_text(encoding="utf-8")
     paragraphs: List[Paragraph] = []
     buffer: List[str] = []
     current_section = ""
@@ -67,6 +66,13 @@ def split_markdown(file_path: Path) -> List[Paragraph]:
 
     _flush_buffer(paragraphs, buffer, current_section, idx_counter)
     return paragraphs
+
+
+def split_markdown(file_path: Path) -> List[Paragraph]:
+    """Lee un archivo Markdown y lo divide en párrafos (delega en split_markdown_text)."""
+
+    content = file_path.read_text(encoding="utf-8")
+    return split_markdown_text(content)
 
 
 def iter_markdown_files(root: Path) -> Iterable[Path]:
