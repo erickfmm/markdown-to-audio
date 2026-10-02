@@ -2,6 +2,7 @@
 name = "md-tts"
 version = "0.1.0"
 description = "CLI to convert Markdown into TTS audio (English/Spanish)"
+license = "MIT"
 authors = [{ name = "Equipo DMBOK", email = "example@example.com" }]
 requires-python = ">=3.10, <=3.12"
 dependencies = [
