@@ -1,4 +1,4 @@
-"""App FastAPI con los endpoints de trabajos y metadata del servicio."""
+"""App FastAPI con los endpoints de trabajos, metadatos y voces de referencia."""
 
 from __future__ import annotations
 
@@ -13,13 +13,37 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from .. import service
-from ..tts import ENGINE_REGISTRY
+from ..tts import (
+    ENGINE_METADATA,
+    ENGINE_REGISTRY,
+    QWEN_SPEAKERS,
+    resolve_qwen_model_id,
+)
 from .jobs import JobManager, JobOptions, JobState
+from .voices import VoiceRefStore, audio_format_hint
 
 logger = logging.getLogger("md_tts.api")
 
 DEFAULT_JOBS_DIR = Path(os.environ.get("MD_TTS_JOBS_DIR", "output_audio/web"))
+DEFAULT_VOICE_REFS_DIR = Path(
+    os.environ.get("MD_TTS_VOICE_REFS_DIR", str(DEFAULT_JOBS_DIR.parent / "voice_refs"))
+)
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+#: Valores por defecto de los metadatos por engine (ver ENGINE_METADATA en tts.py).
+ENGINE_METADATA_DEFAULTS = {
+    "variants": [],
+    "default_variant": None,
+    "speakers": [],
+    "default_speaker": None,
+    "supports_instruct": False,
+    "requires_instruct": False,
+    "supports_voice_clone": False,
+    "requires_voice_reference": False,
+}
+
+#: Familia Qwen3 (clave en QWEN_MODEL_ALIASES) por engine.
+QWEN_ENGINE_VARIANTS = dict(service.QWEN_ENGINE_VARIANTS)
 
 
 class JobCreateRequest(BaseModel):
@@ -31,6 +55,89 @@ class JobCreateRequest(BaseModel):
     device: Optional[str] = None
     workers: int = Field(default=1, ge=1, le=16)
     save_fragments: bool = False
+    qwen_model: Optional[str] = None
+    qwen_speaker: Optional[str] = None
+    qwen_instruct: Optional[str] = None
+    voice_ref_id: Optional[str] = None
+    qwen_ref_text: Optional[str] = None
+    qwen_xvector_only: bool = False
+
+
+def _validate_device(device) -> None:
+    device_clean = str(device or "").strip().lower()
+    valid = device_clean in ("", "auto", "cpu", "cuda") or device_clean.startswith("cuda:")
+    if not valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Device inválido: {device}. Use 'auto', 'cpu' o 'cuda'.",
+        )
+
+
+def _validate_qwen_options(
+    engine: str,
+    voice_store: Optional[VoiceRefStore],
+    qwen_model: Optional[str],
+    qwen_speaker: Optional[str],
+    qwen_instruct: Optional[str],
+    voice_ref_id: Optional[str],
+    qwen_ref_text: Optional[str],
+    qwen_xvector_only: bool,
+) -> tuple:
+    """Valida las opciones qwen3-* y resuelve la referencia de voz.
+
+    Retorna ``(ref_path, ref_text)``: ruta del WAV de referencia y transcripción
+    (posiblemente resuelta desde los metadatos de la referencia) o valores
+    vacíos si no aplican.
+    """
+
+    if engine not in QWEN_ENGINE_VARIANTS:
+        return ("", None)
+    model_id = resolve_qwen_model_id(QWEN_ENGINE_VARIANTS[engine], qwen_model)
+
+    if engine == "qwen3-customvoice":
+        if qwen_speaker and qwen_speaker not in QWEN_SPEAKERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Speaker desconocido: {qwen_speaker}. Opciones: {list(QWEN_SPEAKERS)}",
+            )
+        if (qwen_instruct or "").strip() and "0.6B" in model_id:
+            raise HTTPException(
+                status_code=400,
+                detail="El modelo 0.6B-CustomVoice no soporta instruct; use qwen_model=1.7b.",
+            )
+        return ("", None)
+
+    if engine == "qwen3-voicedesign":
+        if not (qwen_instruct or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail="qwen3-voicedesign requiere qwen_instruct: descripción de la voz "
+                "(género, edad, timbre, emoción, ritmo).",
+            )
+        return ("", None)
+
+    # qwen3-clone: requiere referencia de voz subida a /api/voice-references.
+    if not voice_ref_id:
+        raise HTTPException(
+            status_code=400,
+            detail="qwen3-clone requiere voice_ref_id (suba el audio a /api/voice-references).",
+        )
+    if voice_store is None:
+        raise HTTPException(status_code=500, detail="Almacén de voces no disponible.")
+    ref_path = voice_store.resolve_path(voice_ref_id)
+    if ref_path is None:
+        raise HTTPException(status_code=400, detail=f"Voice reference no encontrada: {voice_ref_id}")
+    # La transcripción puede guardarse junto a la referencia al subirla.
+    if not (qwen_ref_text or "").strip():
+        meta = voice_store.get(voice_ref_id) or {}
+        qwen_ref_text = meta.get("ref_text") or None
+    if not (qwen_ref_text or "").strip() and not qwen_xvector_only:
+        raise HTTPException(
+            status_code=400,
+            detail="qwen3-clone requiere qwen_ref_text (transcripción del audio) o "
+            "qwen_xvector_only=true.",
+        )
+    return (str(ref_path), qwen_ref_text)
 
 
 def _parse_options(
@@ -40,6 +147,13 @@ def _parse_options(
     device,
     workers,
     save_fragments,
+    voice_store: Optional[VoiceRefStore] = None,
+    qwen_model: Optional[str] = None,
+    qwen_speaker: Optional[str] = None,
+    qwen_instruct: Optional[str] = None,
+    voice_ref_id: Optional[str] = None,
+    qwen_ref_text: Optional[str] = None,
+    qwen_xvector_only: bool = False,
 ) -> JobOptions:
     if engine not in ENGINE_REGISTRY:
         raise HTTPException(
@@ -48,8 +162,19 @@ def _parse_options(
         )
     if language not in ("es", "en"):
         raise HTTPException(status_code=400, detail=f"Idioma inválido: {language}. Use 'es' o 'en'.")
-    if device not in (None, "", "cpu", "cuda"):
-        raise HTTPException(status_code=400, detail=f"Device inválido: {device}. Use 'cpu' o 'cuda'.")
+    _validate_device(device)
+
+    qwen_ref_audio, qwen_ref_text = _validate_qwen_options(
+        engine,
+        voice_store,
+        qwen_model,
+        qwen_speaker,
+        qwen_instruct,
+        voice_ref_id,
+        qwen_ref_text,
+        qwen_xvector_only,
+    )
+
     try:
         return JobOptions.from_values(
             engine=engine,
@@ -58,19 +183,30 @@ def _parse_options(
             device=device,
             workers=workers,
             save_fragments=save_fragments,
+            qwen_model=qwen_model,
+            qwen_speaker=qwen_speaker,
+            qwen_instruct=qwen_instruct,
+            qwen_ref_audio=qwen_ref_audio or None,
+            qwen_ref_text=qwen_ref_text,
+            qwen_xvector_only=qwen_xvector_only,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def create_app(jobs_dir: Optional[Path] = None) -> FastAPI:
+def create_app(
+    jobs_dir: Optional[Path] = None,
+    voice_refs_dir: Optional[Path] = None,
+) -> FastAPI:
     app = FastAPI(
         title="md-tts",
         description="API para convertir Markdown a audio mediante trabajos asíncronos.",
         version="0.1.0",
     )
     manager = JobManager(jobs_dir or DEFAULT_JOBS_DIR)
+    voice_store = VoiceRefStore(voice_refs_dir or DEFAULT_VOICE_REFS_DIR)
     app.state.jobs = manager
+    app.state.voice_refs = voice_store
 
     @app.get("/api/health")
     def health() -> dict:
@@ -78,13 +214,68 @@ def create_app(jobs_dir: Optional[Path] = None) -> FastAPI:
 
     @app.get("/api/engines")
     def engines() -> dict:
-        return {
-            "engines": [
-                {"id": name, "language_aware": name in service.LANGUAGE_AWARE_ENGINES}
-                for name in ENGINE_REGISTRY
-            ],
-            "languages": ["es", "en"],
-        }
+        payload = []
+        for name in ENGINE_REGISTRY:
+            meta = dict(ENGINE_METADATA_DEFAULTS)
+            meta.update(ENGINE_METADATA.get(name, {}))
+            payload.append(
+                {
+                    "id": name,
+                    "language_aware": name in service.LANGUAGE_AWARE_ENGINES,
+                    **meta,
+                }
+            )
+        return {"engines": payload, "languages": ["es", "en"]}
+
+    # -- Voces de referencia (clonación) ----------------------------
+
+    @app.post("/api/voice-references")
+    async def create_voice_reference(request: Request) -> dict:
+        content_type = request.headers.get("content-type", "")
+        if not content_type.startswith("multipart/form-data"):
+            raise HTTPException(status_code=400, detail="Use multipart/form-data con el campo 'audio'.")
+        form = await request.form()
+        upload = form.get("audio")
+        if upload is None or isinstance(upload, str):
+            raise HTTPException(status_code=400, detail="Sin archivo: use el campo 'audio'.")
+        raw = await upload.read()
+        if not raw:
+            raise HTTPException(status_code=400, detail="Archivo vacío.")
+        if len(raw) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Archivo demasiado grande (máx. 20 MB).")
+        ref_text = form.get("ref_text")
+        try:
+            meta = voice_store.save(
+                raw,
+                original_name=getattr(upload, "filename", None) or "reference",
+                ref_text=(str(ref_text) if ref_text else None),
+                fmt=audio_format_hint(
+                    getattr(upload, "filename", None) or "",
+                    getattr(upload, "content_type", None) or "",
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"voice_reference": meta}
+
+    @app.get("/api/voice-references")
+    def list_voice_references() -> dict:
+        return {"voice_references": voice_store.list()}
+
+    @app.get("/api/voice-references/{ref_id}/audio")
+    def get_voice_reference_audio(ref_id: str) -> FileResponse:
+        path = voice_store.resolve_path(ref_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail=f"Voice reference no encontrada: {ref_id}")
+        return FileResponse(path, media_type="audio/wav", filename=path.name)
+
+    @app.delete("/api/voice-references/{ref_id}")
+    def delete_voice_reference(ref_id: str) -> dict:
+        if not voice_store.delete(ref_id):
+            raise HTTPException(status_code=404, detail=f"Voice reference no encontrada: {ref_id}")
+        return {"deleted": ref_id}
+
+    # -- Trabajos ----------------------------------------------------
 
     @app.post("/api/jobs")
     async def create_jobs(request: Request) -> dict:
@@ -103,6 +294,13 @@ def create_app(jobs_dir: Optional[Path] = None) -> FastAPI:
                 device=form.get("device") or None,
                 workers=form.get("workers") or 1,
                 save_fragments=form.get("save_fragments") or False,
+                voice_store=voice_store,
+                qwen_model=form.get("qwen_model") or None,
+                qwen_speaker=form.get("qwen_speaker") or None,
+                qwen_instruct=form.get("qwen_instruct") or None,
+                voice_ref_id=form.get("voice_ref_id") or None,
+                qwen_ref_text=form.get("qwen_ref_text") or None,
+                qwen_xvector_only=form.get("qwen_xvector_only") or False,
             )
             for upload in uploads:
                 filename = getattr(upload, "filename", None)
@@ -135,6 +333,13 @@ def create_app(jobs_dir: Optional[Path] = None) -> FastAPI:
                 device=req.device,
                 workers=req.workers,
                 save_fragments=req.save_fragments,
+                voice_store=voice_store,
+                qwen_model=req.qwen_model,
+                qwen_speaker=req.qwen_speaker,
+                qwen_instruct=req.qwen_instruct,
+                voice_ref_id=req.voice_ref_id,
+                qwen_ref_text=req.qwen_ref_text,
+                qwen_xvector_only=req.qwen_xvector_only,
             )
             created.append(manager.submit(name=req.name, content=req.content, options=options))
 

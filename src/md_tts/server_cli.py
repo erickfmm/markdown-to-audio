@@ -87,7 +87,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         from .api.app import create_app as create_api_app
 
         api_url = f"http://{args.api_host}:{api_port}"
-        api_app = create_api_app(jobs_dir=args.jobs_dir)
+        api_kwargs = {"jobs_dir": args.jobs_dir}
+        if args.jobs_dir:
+            # Deriva el almacén de voces del --jobs-dir explícito; si no,
+            # create_app usa sus defaults (env MD_TTS_* o rutas relativas).
+            api_kwargs["voice_refs_dir"] = Path(args.jobs_dir).parent / "voice_refs"
+        api_app = create_api_app(**api_kwargs)
         server = uvicorn.Server(
             uvicorn.Config(api_app, host=args.api_host, port=api_port, log_level="warning")
         )

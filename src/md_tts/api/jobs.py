@@ -38,6 +38,12 @@ class JobOptions:
     device: Optional[str] = None
     workers: int = 1
     save_fragments: bool = False
+    qwen_model: Optional[str] = None
+    qwen_speaker: Optional[str] = None
+    qwen_instruct: Optional[str] = None
+    qwen_ref_audio: Optional[str] = None  # ruta resuelta desde voice_ref_id
+    qwen_ref_text: Optional[str] = None
+    qwen_xvector_only: bool = False
 
     @classmethod
     def from_values(
@@ -48,6 +54,12 @@ class JobOptions:
         device: Optional[str] = None,
         workers: int = 1,
         save_fragments: bool = False,
+        qwen_model: Optional[str] = None,
+        qwen_speaker: Optional[str] = None,
+        qwen_instruct: Optional[str] = None,
+        qwen_ref_audio: Optional[str] = None,
+        qwen_ref_text: Optional[str] = None,
+        qwen_xvector_only: bool = False,
     ) -> "JobOptions":
         try:
             return cls(
@@ -57,6 +69,12 @@ class JobOptions:
                 device=(str(device) if device else None),
                 workers=min(16, max(1, int(workers))),
                 save_fragments=save_fragments in (True, "true", "1", "on", "yes"),
+                qwen_model=(str(qwen_model) if qwen_model else None),
+                qwen_speaker=(str(qwen_speaker) if qwen_speaker else None),
+                qwen_instruct=(str(qwen_instruct) if qwen_instruct else None),
+                qwen_ref_audio=(str(qwen_ref_audio) if qwen_ref_audio else None),
+                qwen_ref_text=(str(qwen_ref_text) if qwen_ref_text else None),
+                qwen_xvector_only=qwen_xvector_only in (True, "true", "1", "on", "yes"),
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Opción inválida: {exc}") from exc
@@ -97,6 +115,11 @@ class Job:
                 "device": self.options.device,
                 "workers": self.options.workers,
                 "save_fragments": self.options.save_fragments,
+                "qwen_model": self.options.qwen_model,
+                "qwen_speaker": self.options.qwen_speaker,
+                "qwen_instruct": self.options.qwen_instruct,
+                "qwen_ref_text": self.options.qwen_ref_text,
+                "qwen_xvector_only": self.options.qwen_xvector_only,
             },
         }
         if self.state is JobState.DONE and self.output_path is not None:
@@ -178,6 +201,12 @@ class JobManager:
                     device=job.options.device,
                     workers=job.options.workers,
                     save_fragments=job.options.save_fragments,
+                    qwen_model=job.options.qwen_model,
+                    qwen_speaker=job.options.qwen_speaker,
+                    qwen_instruct=job.options.qwen_instruct,
+                    qwen_ref_audio=job.options.qwen_ref_audio,
+                    qwen_ref_text=job.options.qwen_ref_text,
+                    qwen_xvector_only=job.options.qwen_xvector_only,
                     progress_callback=report,
                     show_progress=False,
                 )

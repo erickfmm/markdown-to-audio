@@ -72,6 +72,28 @@ input[type="text"], input[type="number"], textarea, select {
   width: 100%;
 }
 
+input[type="file"] {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 7px 11px;
+  font: inherit;
+  width: 100%;
+}
+input[type="file"]::file-selector-button {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 12px;
+  margin-right: 10px;
+  cursor: pointer;
+  font: inherit;
+}
+input[type="file"]:hover { border-color: var(--accent); }
+input[type="file"]::file-selector-button:hover { border-color: var(--accent); }
+
 textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
 input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
@@ -81,6 +103,34 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
   gap: 12px;
   margin-top: 4px;
 }
+
+/* Panel Qwen3 (modelo / speaker / instruct / clonación de voz) */
+.qwen-options {
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border);
+}
+
+.ref-audio-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.ref-audio-row input[type="file"] {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.ref-audio-row .btn { white-space: nowrap; }
+#qwen-record.recording {
+  border-color: var(--red);
+  color: var(--red);
+  animation: record-pulse 1.2s ease-in-out infinite;
+}
+@keyframes record-pulse { 50% { opacity: 0.55; } }
+#qwen-ref-preview { width: 100%; height: 36px; margin: 4px 0 8px; }
+#qwen-ref-status { margin: 6px 0 0; }
 
 .dropzone {
   border: 2px dashed var(--border);

@@ -3,6 +3,11 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
+      # Perfil de motores: TTS_PROFILE=qwen compila con los motores Qwen3
+      # (qwen-tts); classic (defecto) compila kokoro + chatterbox. Los dos
+      # no pueden convivir (fijan transformers incompatibles).
+      args:
+        TTS_PROFILE: ${TTS_PROFILE:-classic}
     image: md-tts-backend
     ports:
       - "${API_PORT:-8000}:8000"

@@ -5,6 +5,8 @@ description = "CLI to convert Markdown into TTS audio (English/Spanish)"
 authors = [{ name = "Equipo DMBOK", email = "example@example.com" }]
 requires-python = ">=3.10, <=3.12"
 dependencies = [
+    # Núcleo compartido por todos los motores/motores web (torch, transformers,
+    # accelerate cubren mms y vibevoice, y el stack FastAPI/Flask).
     "transformers>=4.46.0",
     "accelerate>=0.30.0",
     "huggingface_hub>=0.24.0",
@@ -14,13 +16,45 @@ dependencies = [
     "soundfile>=0.12.1",
     "numpy>=1.25.0",
     "tqdm>=4.66.1",
-    "kokoro>=0.9.2",
-    "chatterbox-tts>=0.1.6",
     "flask>=3.0",
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "python-multipart>=0.0.9",
     "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# Motores según paquete ML necesario (el núcleo trae mms + vibevoice).
+#   uv sync                -> núcleo + kokoro + chatterbox (grupo por defecto)
+#   uv sync --extra kokoro -> + kokoro (sin grupo por defecto)
+#   uv sync --extra qwen   -> + qwen3-* ; NO compatible con chatterbox
+#   uv sync --no-default-groups --extra kokoro --extra qwen -> kokoro + qwen3-*
+# NOTA: chatterbox-tts y qwen-tts fijan versiones exactas e incompatibles de
+# transformers (4.46.3 / 5.2.0 vs 4.57.3): NO pueden instalarse juntos.
+kokoro = ["kokoro>=0.9.2"]
+chatterbox = ["chatterbox-tts>=0.1.6"]
+# onnxruntime<1.24: las versiones 1.24+ solo publican wheels para Python
+# >=3.11; el proyecto soporta 3.10 (1.23.2 es la última con cp310).
+qwen = ["qwen-tts>=0.1.1", "onnxruntime<1.24"]
+
+[dependency-groups]
+# Paridad con versiones anteriores: `uv sync` instala también kokoro y
+# chatterbox. Al usar qwen hay que quitar este grupo (--no-default-groups).
+classic = ["kokoro>=0.9.2", "chatterbox-tts>=0.1.6"]
+
+[tool.uv]
+default-groups = ["classic"]
+# chatterbox-tts y qwen-tts fijan `transformers==` incompatibles entre sí:
+# se declaran conflictos para que uv resuelva el lock por ramas.
+conflicts = [
+    [
+        { extra = "qwen" },
+        { extra = "chatterbox" },
+    ],
+    [
+        { extra = "qwen" },
+        { group = "classic" },
+    ],
 ]
 
 [project.scripts]

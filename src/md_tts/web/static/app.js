@@ -35,6 +35,26 @@ const I18N = {
     backendDown: "API sin conexión",
     sendFailed: "No se pudo enviar el trabajo",
     emptyDrop: "Suelta los archivos aquí",
+    qwenModel: "Modelo Qwen3",
+    qwenSpeaker: "Voz (speaker)",
+    qwenInstructStyle: "Instrucción de estilo (opcional)",
+    qwenInstructDesign: "Descripción de la voz (obligatorio)",
+    qwenInstructHelpStyle: "Cómo leer el texto. Ej.: «Lée todo con un tono muy alegre y a ritmo rápido».",
+    qwenInstructHelpDesign: "Describe la voz a crear: género, edad, timbre, emoción, ritmo. Ej.: «Voz masculina joven, tenor, timbre cálido, tono tranquilo de documental».",
+    qwenInstructPlaceholderStyle: "Ej.: Habla con alegría y a un ritmo rápido",
+    qwenInstructPlaceholderDesign: "Ej.: Voz femenina adulta, timbre cálido, tono sereno de narradora",
+    qwenRefAudio: "Audio de referencia para clonar",
+    qwenRefAudioHelp: "Sube un mp3/wav (ideal 3–10 s, una sola voz, sin música) o graba tu voz desde el navegador.",
+    record: "Grabar",
+    stopRecord: "Detener",
+    qwenRefText: "Transcripción del audio (recomendado)",
+    qwenRefTextHelp: "Qué dice el audio, en texto. Mejora mucho la calidad del clon.",
+    qwenRefTextPlaceholder: "Escribe aquí lo que dice el audio…",
+    refUploading: "Subiendo audio de referencia…",
+    refUploadFailed: "No se pudo subir el audio de referencia",
+    micError: "No se pudo acceder al micrófono (requiere localhost o HTTPS)",
+    refRequired: "Sube o graba un audio de referencia para clonar la voz.",
+    instructRequired: "Escribe una descripción de la voz para el diseño.",
   },
   en: {
     newConversion: "New conversion",
@@ -66,6 +86,26 @@ const I18N = {
     backendDown: "API offline",
     sendFailed: "Could not submit the job",
     emptyDrop: "Drop files here",
+    qwenModel: "Qwen3 model",
+    qwenSpeaker: "Voice (speaker)",
+    qwenInstructStyle: "Style instruction (optional)",
+    qwenInstructDesign: "Voice description (required)",
+    qwenInstructHelpStyle: "How to read the text. E.g. 'Read everything in a very happy tone, fast pace.'",
+    qwenInstructHelpDesign: "Describe the voice to create: gender, age, timbre, emotion, pace. E.g. 'Young male voice, tenor range, warm timbre, calm documentary tone.'",
+    qwenInstructPlaceholderStyle: "E.g. Speak cheerfully at a fast pace",
+    qwenInstructPlaceholderDesign: "E.g. Adult female voice, warm timbre, calm narrator tone",
+    qwenRefAudio: "Reference audio to clone",
+    qwenRefAudioHelp: "Upload an mp3/wav (ideally 3–10 s, a single voice, no music) or record your voice from the browser.",
+    record: "Record",
+    stopRecord: "Stop",
+    qwenRefText: "Audio transcript (recommended)",
+    qwenRefTextHelp: "What the audio says, in text. Greatly improves clone quality.",
+    qwenRefTextPlaceholder: "Type here what the audio says…",
+    refUploading: "Uploading reference audio…",
+    refUploadFailed: "Could not upload the reference audio",
+    micError: "Could not access the microphone (localhost or HTTPS required)",
+    refRequired: "Upload or record a reference audio to clone the voice.",
+    instructRequired: "Write a voice description for voice design.",
   },
 };
 
@@ -81,6 +121,7 @@ function applyLang() {
   });
   document.documentElement.lang = lang;
   document.getElementById("lang-toggle").textContent = lang === "es" ? "EN" : "ES";
+  updateQwenPanel(); // refresca etiquetas dinámicas del panel Qwen
 }
 
 /* ------------------------------------------------------------------ */
@@ -145,12 +186,16 @@ async function checkBackend() {
 /* Motores                                                             */
 /* ------------------------------------------------------------------ */
 
+let engineMeta = {};
+
 async function loadEngines() {
   try {
     const data = await fetchJson("/api/engines");
+    engineMeta = {};
     const select = $("engine");
     select.innerHTML = "";
-    data.engines.forEach((engine) => {
+    (data.engines || []).forEach((engine) => {
+      engineMeta[engine.id] = engine;
       const option = document.createElement("option");
       option.value = engine.id;
       option.textContent = engine.language_aware
@@ -158,9 +203,175 @@ async function loadEngines() {
         : `${engine.id} (⚠ ${t("language")})`;
       select.appendChild(option);
     });
+    updateQwenPanel();
   } catch (_) {
     /* la UI de salud ya informa del fallo */
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Panel Qwen3 (modelo / speaker / instruct / clonación)               */
+/* ------------------------------------------------------------------ */
+
+function qwenMeta() {
+  const meta = engineMeta[$("engine").value];
+  return meta && meta.variants && meta.variants.length > 0 ? meta : null;
+}
+
+function updateQwenPanel() {
+  const meta = qwenMeta();
+  $("qwen-options").hidden = !meta;
+  if (!meta) return;
+
+  // Tamaño del modelo (1.7b / 0.6b según el engine)
+  const modelSel = $("qwen-model");
+  const prevModel = modelSel.value;
+  modelSel.innerHTML = "";
+  meta.variants.forEach((variant) => {
+    const option = document.createElement("option");
+    option.value = variant;
+    option.textContent = variant.toUpperCase();
+    modelSel.appendChild(option);
+  });
+  modelSel.value = meta.variants.includes(prevModel)
+    ? prevModel
+    : meta.default_variant || meta.variants[0];
+
+  // Speaker premium (solo qwen3-customvoice)
+  const speakerField = $("qwen-speaker-field");
+  const speakerSel = $("qwen-speaker");
+  const speakers = meta.speakers || [];
+  speakerField.hidden = speakers.length === 0;
+  if (speakers.length > 0) {
+    const prevSpeaker = speakerSel.value;
+    speakerSel.innerHTML = "";
+    speakers.forEach((speaker) => {
+      const option = document.createElement("option");
+      option.value = speaker;
+      option.textContent = speaker;
+      speakerSel.appendChild(option);
+    });
+    speakerSel.value = speakers.includes(prevSpeaker)
+      ? prevSpeaker
+      : meta.default_speaker || speakers[0];
+  }
+
+  // Instrucción: estilo (customvoice) o diseño de voz (voicedesign).
+  // Solo customvoice 1.7b soporta instruct (0.6b la rechaza en el backend).
+  const isDesign = $("engine").value === "qwen3-voicedesign";
+  const supportsInstructNow =
+    meta.supports_instruct && !(isDesign === false && modelSel.value === "0.6b");
+  $("qwen-instruct-field").hidden = !supportsInstructNow;
+  if (supportsInstructNow) {
+    $("qwen-instruct-label").textContent = isDesign ? t("qwenInstructDesign") : t("qwenInstructStyle");
+    $("qwen-instruct-help").textContent = isDesign ? t("qwenInstructHelpDesign") : t("qwenInstructHelpStyle");
+    $("qwen-instruct").placeholder = isDesign
+      ? t("qwenInstructPlaceholderDesign")
+      : t("qwenInstructPlaceholderStyle");
+  }
+
+  // Clonación de voz (solo qwen3-clone)
+  $("qwen-clone-box").hidden = !meta.supports_voice_clone;
+}
+
+/* ------------------------------------------------------------------ */
+/* Audio de referencia: subida y grabación desde el navegador          */
+/* ------------------------------------------------------------------ */
+
+let voiceRef = null; // { id, duration_s, audio_url, ... }
+
+async function uploadVoiceRef(file) {
+  showFormError("");
+  const status = $("qwen-ref-status");
+  status.hidden = false;
+  status.textContent = t("refUploading");
+  try {
+    const form = new FormData();
+    form.append("audio", file, file.name);
+    const refText = $("qwen-ref-text").value.trim();
+    if (refText) form.append("ref_text", refText);
+    const data = await fetchJson("/api/voice-references", { method: "POST", body: form });
+    voiceRef = data.voice_reference;
+    const preview = $("qwen-ref-preview");
+    preview.hidden = false;
+    preview.src = voiceRef.audio_url;
+    status.textContent = `✓ ${file.name} · ${voiceRef.duration_s}s`;
+  } catch (err) {
+    voiceRef = null;
+    $("qwen-ref-preview").hidden = true;
+    status.textContent = "";
+    status.hidden = true;
+    showFormError(`${t("refUploadFailed")}: ${err.message}`);
+  }
+}
+
+let mediaRecorder = null;
+let recordStream = null;
+
+async function toggleRecording() {
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop();
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === "undefined") {
+    showFormError(t("micError"));
+    return;
+  }
+  try {
+    recordStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (_) {
+    showFormError(t("micError"));
+    return;
+  }
+
+  const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "";
+  mediaRecorder = new MediaRecorder(recordStream, mimeType ? { mimeType } : undefined);
+  const chunks = [];
+  mediaRecorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) chunks.push(event.data);
+  };
+  mediaRecorder.onstop = () => {
+    recordStream.getTracks().forEach((track) => track.stop());
+    recordStream = null;
+    const btn = $("qwen-record");
+    btn.classList.remove("recording");
+    btn.innerHTML = `🎤 <span data-i18n="record"></span>`;
+    btn.querySelector("[data-i18n]").textContent = t("record");
+    const type = mediaRecorder.mimeType || "audio/webm";
+    const blob = new Blob(chunks, { type });
+    const ext = type.includes("webm") ? "webm" : type.includes("ogg") ? "ogg" : "audio";
+    uploadVoiceRef(new File([blob], `grabacion-${Date.now()}.${ext}`, { type }));
+  };
+  mediaRecorder.start();
+  const btn = $("qwen-record");
+  btn.classList.add("recording");
+  btn.textContent = `⏹ ${t("stopRecord")}`;
+}
+
+function collectQwenFields() {
+  const meta = qwenMeta();
+  if (!meta) return {};
+  const instructVisible = !$("qwen-instruct-field").hidden;
+  const cloneVisible = !$("qwen-clone-box").hidden;
+  const fields = {
+    qwen_model: $("qwen-model").value,
+    qwen_speaker: $("qwen-speaker-field").hidden ? null : $("qwen-speaker").value,
+    qwen_instruct: instructVisible && $("qwen-instruct").value.trim() ? $("qwen-instruct").value.trim() : null,
+    voice_ref_id: cloneVisible && voiceRef ? voiceRef.id : null,
+    qwen_ref_text: cloneVisible && $("qwen-ref-text").value.trim() ? $("qwen-ref-text").value.trim() : null,
+  };
+  Object.keys(fields).forEach((key) => {
+    if (fields[key] === null || fields[key] === undefined) delete fields[key];
+  });
+  return fields;
+}
+
+function validateQwenFields(qwenFields) {
+  const meta = qwenMeta();
+  if (!meta) return null;
+  if (meta.requires_instruct && !qwenFields.qwen_instruct) return t("instructRequired");
+  if (meta.requires_voice_reference && !qwenFields.voice_ref_id) return t("refRequired");
+  return null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -316,12 +527,19 @@ async function submit() {
 
   const files = selectedFiles();
   const text = $("doc-text").value.trim();
+  const qwenFields = collectQwenFields();
+  const qwenError = validateQwenFields(qwenFields);
+  if (qwenError) {
+    showFormError(qwenError);
+    return;
+  }
   const common = {
     engine: $("engine").value || "mms",
     language: $("language").value,
     pause_ms: Number($("pause-ms").value) || 500,
     device: $("device").value || null,
     workers: Number($("workers").value) || 1,
+    ...qwenFields,
   };
 
   let resp;
@@ -406,6 +624,15 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   $("submit").addEventListener("click", submit);
+
+  $("engine").addEventListener("change", updateQwenPanel);
+  // La visibilidad del instruct depende del tamaño elegido (0.6b no lo soporta)
+  $("qwen-model").addEventListener("change", updateQwenPanel);
+  $("qwen-ref-file").addEventListener("change", () => {
+    const file = ($("qwen-ref-file").files || [])[0];
+    if (file) uploadVoiceRef(file);
+  });
+  $("qwen-record").addEventListener("click", toggleRecording);
 
   initDropzone();
   loadEngines();

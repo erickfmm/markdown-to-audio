@@ -58,13 +58,23 @@ wait_port() {
 case "$MODE" in
   docker)
     echo ">> Modo Docker completo: GUI en http://localhost:${PORT} | API en http://localhost:${API_PORT}"
-    compose up --build
+    # TTS_PROFILE=qwen compila las imágenes con los motores Qwen3
+    if [[ "${TTS_PROFILE:-}" == "qwen" ]]; then
+      TTS_PROFILE=qwen compose up --build
+    else
+      compose up --build
+    fi
     ;;
 
   local)
     require_uv
     echo ">> Modo local (uv): GUI en http://${HOST}:${PORT} | API embebida en el puerto ${API_PORT}"
-    uv sync
+    # Perfil de motores: TTS_PROFILE=qwen usa los extras qwen (sin chatterbox).
+    if [[ "${TTS_PROFILE:-}" == "qwen" ]]; then
+      uv sync --no-default-groups --extra qwen
+    else
+      uv sync
+    fi
     exec uv run md-tts-web \
       --host "$HOST" \
       --port "$PORT" \
@@ -82,7 +92,11 @@ case "$MODE" in
     fi
 
     echo ">> Modo híbrido: backend local (uv) + frontend Docker"
-    uv sync
+    if [[ "${TTS_PROFILE:-}" == "qwen" ]]; then
+      uv sync --no-default-groups --extra qwen
+    else
+      uv sync
+    fi
 
     echo ">> Iniciando backend FastAPI en ${API_HOST}:${API_PORT} (log: $LOG_FILE)"
     nohup uv run uvicorn md_tts.api.app:app \

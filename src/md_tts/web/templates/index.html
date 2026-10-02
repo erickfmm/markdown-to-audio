@@ -69,6 +69,41 @@
         </label>
       </div>
 
+      <div id="qwen-options" class="qwen-options" hidden>
+        <div class="options-grid">
+          <label class="field">
+            <span data-i18n="qwenModel"></span>
+            <select id="qwen-model"></select>
+          </label>
+          <label class="field" id="qwen-speaker-field">
+            <span data-i18n="qwenSpeaker"></span>
+            <select id="qwen-speaker"></select>
+          </label>
+        </div>
+        <label class="field" id="qwen-instruct-field" hidden>
+          <span id="qwen-instruct-label"></span>
+          <textarea id="qwen-instruct" rows="2"></textarea>
+          <p id="qwen-instruct-help" class="muted small"></p>
+        </label>
+        <div id="qwen-clone-box" hidden>
+          <label class="field">
+            <span data-i18n="qwenRefAudio"></span>
+            <div class="ref-audio-row">
+              <input id="qwen-ref-file" type="file" accept="audio/*,.mp3,.wav,.ogg,.webm,.m4a" />
+              <button id="qwen-record" type="button" class="btn">🎤 <span data-i18n="record"></span></button>
+            </div>
+            <p class="muted small" data-i18n="qwenRefAudioHelp"></p>
+          </label>
+          <p id="qwen-ref-status" class="muted small" hidden></p>
+          <audio id="qwen-ref-preview" controls preload="metadata" hidden></audio>
+          <label class="field">
+            <span data-i18n="qwenRefText"></span>
+            <textarea id="qwen-ref-text" rows="2"></textarea>
+            <p class="muted small" data-i18n="qwenRefTextHelp"></p>
+          </label>
+        </div>
+      </div>
+
       <p id="form-error" class="error" hidden></p>
       <button id="submit" type="button" class="btn primary"><span data-i18n="convert"></span></button>
     </section>

@@ -24,17 +24,60 @@ from tqdm import tqdm
 
 from . import parser as md_parser
 from .audio_utils import concatenate_with_pause
-from .tts import build_engine
+from .tts import build_engine, resolve_qwen_model_id
 
 logger = logging.getLogger("md_tts")
 
-LANGUAGE_AWARE_ENGINES = {"mms", "kokoro", "chatterbox", "cosyvoice"}
+LANGUAGE_AWARE_ENGINES = {
+    "mms",
+    "kokoro",
+    "chatterbox",
+    "cosyvoice",
+    "qwen3-customvoice",
+    "qwen3-voicedesign",
+    "qwen3-clone",
+}
+
+#: Familia (clave en QWEN_MODEL_ALIASES) de cada engine Qwen3.
+QWEN_ENGINE_VARIANTS = {
+    "qwen3-customvoice": "customvoice",
+    "qwen3-voicedesign": "voicedesign",
+    "qwen3-clone": "base",
+}
+
+#: Campos que definen la clave de la caché por engine. Los engines Qwen3 NO
+#: incluyen language/estilo: cambiar idioma, speaker o instruct NO recarga el
+#: modelo (esos valores se aplican como atributos de ejecución, ver
+#: ``_apply_runtime_options``).
+ENGINE_CACHE_KEY_FIELDS = {
+    "mms": ("language", "device"),
+    "kokoro": ("language", "device"),
+    "chatterbox": ("language", "device"),
+    "vibevoice": ("device",),
+    "cosyvoice": ("language", "device", "cosyvoice_model_dir", "cosyvoice_prompt_wav"),
+    "qwen3-customvoice": ("device", "qwen_model"),
+    "qwen3-voicedesign": ("device", "qwen_model"),
+    "qwen3-clone": ("device", "qwen_model"),
+}
+DEFAULT_CACHE_KEY_FIELDS = ("language", "device")
+
+#: Opciones que se aplican al engine obtenido de la caché antes de sintetizar
+#: (seguro: los jobs se procesan de uno en uno en el worker FIFO y el CLI es
+#: monohilo).
+RUNTIME_OPTION_FIELDS = (
+    "language",
+    "qwen_speaker",
+    "qwen_instruct",
+    "qwen_ref_audio",
+    "qwen_ref_text",
+    "qwen_xvector_only",
+)
 
 ProgressCallback = Callable[[int, int], None]
 
 
 class EngineCache:
-    """Caché thread-safe de motores TTS por (engine, language, device, ...).
+    """Caché thread-safe de motores TTS por (engine, idioma, dispositivo, ...).
 
     En un servidor de larga vida evita recargar el modelo en cada párrafo.
     """
@@ -44,23 +87,42 @@ class EngineCache:
         self._lock = threading.Lock()
 
     def get(self, engine_name: str, **kwargs):
-        key = (
-            engine_name,
-            kwargs.get("language"),
-            kwargs.get("device"),
-            str(kwargs.get("cosyvoice_model_dir") or ""),
-            str(kwargs.get("cosyvoice_prompt_wav") or ""),
-        )
+        key = _engine_cache_key(engine_name, kwargs)
         with self._lock:
             engine = self._engines.get(key)
             if engine is None:
                 engine = build_engine(engine_name, **kwargs)
                 self._engines[key] = engine
+            # Aplica idioma/estilo SIEMPRE: cambiar speaker/instruct/referencia
+            # sobre un engine cacheado no reconstruye el modelo.
+            _apply_runtime_options(engine, kwargs)
             return engine
 
     def clear(self) -> None:
         with self._lock:
             self._engines.clear()
+
+
+def _engine_cache_key(engine_name: str, kwargs: dict) -> tuple:
+    fields = ENGINE_CACHE_KEY_FIELDS.get(engine_name, DEFAULT_CACHE_KEY_FIELDS)
+    values = []
+    for field in fields:
+        value = kwargs.get(field)
+        if field == "qwen_model" and engine_name in QWEN_ENGINE_VARIANTS:
+            # Normaliza alias (1.7b) vs id completo para no cargar dos veces
+            # el mismo modelo.
+            value = resolve_qwen_model_id(QWEN_ENGINE_VARIANTS[engine_name], value)
+        values.append(str(value or ""))
+    return (engine_name, *values)
+
+
+def _apply_runtime_options(engine, kwargs: dict) -> None:
+    """Aplica idioma/estilo a un engine (posiblemente reutilizado de la caché)."""
+
+    for field in RUNTIME_OPTION_FIELDS:
+        value = kwargs.get(field)
+        if value is not None and hasattr(engine, field):
+            setattr(engine, field, value)
 
 
 _engine_cache = EngineCache()
@@ -80,6 +142,12 @@ def process_paragraph(
     device: Optional[str] = None,
     cosyvoice_model_dir: Optional[Path] = None,
     cosyvoice_prompt_wav: Optional[Path] = None,
+    qwen_model: Optional[str] = None,
+    qwen_speaker: Optional[str] = None,
+    qwen_instruct: Optional[str] = None,
+    qwen_ref_audio: Optional[str] = None,
+    qwen_ref_text: Optional[str] = None,
+    qwen_xvector_only: bool = False,
     temp_dir: Optional[Path] = None,
     use_cache: bool = True,
 ) -> Tuple[int, Optional[AudioSegment]]:
@@ -101,23 +169,25 @@ def process_paragraph(
                 logger.warning("Error cargando fragmento existente %s: %s", fragment_path, exc)
 
     # Sintetizar el fragmento
+    engine_kwargs = {
+        "language": language,
+        "device": device,
+        "cosyvoice_model_dir": cosyvoice_model_dir,
+        "cosyvoice_prompt_wav": cosyvoice_prompt_wav,
+        "qwen_model": qwen_model,
+        "qwen_speaker": qwen_speaker,
+        "qwen_instruct": qwen_instruct,
+        "qwen_ref_audio": qwen_ref_audio,
+        "qwen_ref_text": qwen_ref_text,
+        "qwen_xvector_only": qwen_xvector_only,
+    }
     try:
         if use_cache:
-            engine = _engine_cache.get(
-                engine_name,
-                language=language,
-                device=device,
-                cosyvoice_model_dir=cosyvoice_model_dir,
-                cosyvoice_prompt_wav=cosyvoice_prompt_wav,
-            )
+            # EngineCache aplica idioma/estilo al engine cacheado y reconstruye
+            # el modelo solo cuando cambia la clave (device, qwen_model, ...).
+            engine = _engine_cache.get(engine_name, **engine_kwargs)
         else:
-            engine = build_engine(
-                engine_name,
-                language=language,
-                device=device,
-                cosyvoice_model_dir=cosyvoice_model_dir,
-                cosyvoice_prompt_wav=cosyvoice_prompt_wav,
-            )
+            engine = build_engine(engine_name, **engine_kwargs)
         seg = engine.synthesize(text)
 
         # Guardar fragmento si se solicita
@@ -126,6 +196,10 @@ def process_paragraph(
             seg.export(fragment_path, format="wav")
 
         return (para.index, seg)
+    except ImportError:
+        # Dependencias ausentes (qwen-tts, CosyVoice...): abortar con el
+        # mensaje de instalación claro en vez de fallar párrafo a párrafo.
+        raise
     except Exception as exc:
         logger.error("Error sintetizando párrafo %s: %s", para.index, exc)
         return (para.index, None)
@@ -141,6 +215,12 @@ def process_markdown_text(
     device: Optional[str] = None,
     cosyvoice_model_dir: Optional[Path] = None,
     cosyvoice_prompt_wav: Optional[Path] = None,
+    qwen_model: Optional[str] = None,
+    qwen_speaker: Optional[str] = None,
+    qwen_instruct: Optional[str] = None,
+    qwen_ref_audio: Optional[str] = None,
+    qwen_ref_text: Optional[str] = None,
+    qwen_xvector_only: bool = False,
     save_fragments: bool = False,
     workers: int = 1,
     progress_callback: Optional[ProgressCallback] = None,
@@ -179,6 +259,12 @@ def process_markdown_text(
             device=device,
             cosyvoice_model_dir=cosyvoice_model_dir,
             cosyvoice_prompt_wav=cosyvoice_prompt_wav,
+            qwen_model=qwen_model,
+            qwen_speaker=qwen_speaker,
+            qwen_instruct=qwen_instruct,
+            qwen_ref_audio=qwen_ref_audio,
+            qwen_ref_text=qwen_ref_text,
+            qwen_xvector_only=qwen_xvector_only,
             temp_dir=temp_dir,
             use_cache=False,
         )
@@ -205,6 +291,12 @@ def process_markdown_text(
                 device=device,
                 cosyvoice_model_dir=cosyvoice_model_dir,
                 cosyvoice_prompt_wav=cosyvoice_prompt_wav,
+                qwen_model=qwen_model,
+                qwen_speaker=qwen_speaker,
+                qwen_instruct=qwen_instruct,
+                qwen_ref_audio=qwen_ref_audio,
+                qwen_ref_text=qwen_ref_text,
+                qwen_xvector_only=qwen_xvector_only,
                 temp_dir=temp_dir,
                 use_cache=use_cache,
             )
@@ -236,6 +328,12 @@ def process_markdown_file(
     device: Optional[str] = None,
     cosyvoice_model_dir: Optional[Path] = None,
     cosyvoice_prompt_wav: Optional[Path] = None,
+    qwen_model: Optional[str] = None,
+    qwen_speaker: Optional[str] = None,
+    qwen_instruct: Optional[str] = None,
+    qwen_ref_audio: Optional[str] = None,
+    qwen_ref_text: Optional[str] = None,
+    qwen_xvector_only: bool = False,
     save_fragments: bool = False,
     workers: int = 1,
     progress_callback: Optional[ProgressCallback] = None,
@@ -253,6 +351,12 @@ def process_markdown_file(
         device=device,
         cosyvoice_model_dir=cosyvoice_model_dir,
         cosyvoice_prompt_wav=cosyvoice_prompt_wav,
+        qwen_model=qwen_model,
+        qwen_speaker=qwen_speaker,
+        qwen_instruct=qwen_instruct,
+        qwen_ref_audio=qwen_ref_audio,
+        qwen_ref_text=qwen_ref_text,
+        qwen_xvector_only=qwen_xvector_only,
         save_fragments=save_fragments,
         workers=workers,
         progress_callback=progress_callback,

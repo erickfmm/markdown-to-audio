@@ -29,7 +29,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--engine",
-        choices=["mms", "kokoro", "chatterbox", "vibevoice", "cosyvoice"],
+        choices=[
+            "mms",
+            "kokoro",
+            "chatterbox",
+            "vibevoice",
+            "cosyvoice",
+            "qwen3-customvoice",
+            "qwen3-voicedesign",
+            "qwen3-clone",
+        ],
         default="mms",
         help="Motor TTS a usar",
     )
@@ -49,7 +58,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--device",
         type=str,
         default=None,
-        help="cpu o cuda (si disponible)",
+        help="cpu, cuda o auto (motores qwen3 usan GPU si está disponible)",
     )
     parser.add_argument(
         "--cosyvoice-model-dir",
@@ -62,6 +71,44 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="WAV de referencia de voz para CosyVoice (opcional).",
+    )
+    parser.add_argument(
+        "--qwen-model",
+        type=str,
+        default=None,
+        help="Motor qwen3: tamaño '1.7b'/'0.6b' o un id de HuggingFace/ruta local.",
+    )
+    parser.add_argument(
+        "--qwen-speaker",
+        type=str,
+        default=None,
+        help="qwen3-customvoice: voz premium (Vivian, Serena, Uncle_Fu, Dylan, "
+        "Eric, Ryan, Aiden, Ono_Anna, Sohee).",
+    )
+    parser.add_argument(
+        "--qwen-instruct",
+        type=str,
+        default=None,
+        help="qwen3: instrucción de estilo (customvoice 1.7b) o descripción de "
+        "la voz a diseñar (voicedesign, obligatoria).",
+    )
+    parser.add_argument(
+        "--qwen-ref-audio",
+        type=Path,
+        default=None,
+        help="qwen3-clone: audio de referencia para clonar la voz (wav/mp3, "
+        "ideal 3-10 s de una sola voz).",
+    )
+    parser.add_argument(
+        "--qwen-ref-text",
+        type=str,
+        default=None,
+        help="qwen3-clone: transcripción del audio de referencia (mejora el clon).",
+    )
+    parser.add_argument(
+        "--qwen-xvector-only",
+        action="store_true",
+        help="qwen3-clone: clonar solo con el embedding del hablante (sin transcripción).",
     )
     parser.add_argument(
         "--save-fragments",
@@ -95,6 +142,7 @@ def main(argv: List[str] | None = None) -> None:
         logger.warning(
             "VibeVoice está optimizado principalmente para inglés; el resultado en español puede degradarse."
         )
+    _validate_qwen_args(args)
 
     for md_file in md_parser.iter_markdown_files(input_dir):
         out_path = process_markdown_file(
@@ -106,12 +154,46 @@ def main(argv: List[str] | None = None) -> None:
             device=args.device,
             cosyvoice_model_dir=args.cosyvoice_model_dir,
             cosyvoice_prompt_wav=args.cosyvoice_prompt_wav,
+            qwen_model=args.qwen_model,
+            qwen_speaker=args.qwen_speaker,
+            qwen_instruct=args.qwen_instruct,
+            qwen_ref_audio=str(args.qwen_ref_audio) if args.qwen_ref_audio else None,
+            qwen_ref_text=args.qwen_ref_text,
+            qwen_xvector_only=args.qwen_xvector_only,
             save_fragments=args.save_fragments,
             workers=args.workers,
         )
         logger.info("Audio generado: %s", out_path)
         if args.save_fragments:
             logger.info("Fragmentos guardados en: %s/fragments/%s", output_dir, md_file.stem)
+
+
+def _validate_qwen_args(args: argparse.Namespace) -> None:
+    """Valida las opciones qwen3-* antes de sintetizar (errores claros)."""
+
+    from .tts import QWEN_SPEAKERS
+
+    if args.engine == "qwen3-voicedesign" and not (args.qwen_instruct or "").strip():
+        raise SystemExit(
+            "qwen3-voicedesign requiere --qwen-instruct con la descripción de la voz "
+            "(género, edad, timbre, emoción, ritmo)."
+        )
+    if args.engine == "qwen3-clone":
+        if not args.qwen_ref_audio:
+            raise SystemExit("qwen3-clone requiere --qwen-ref-audio (audio de referencia para clonar).")
+        if not args.qwen_ref_audio.is_file():
+            raise SystemExit(f"No existe el audio de referencia: {args.qwen_ref_audio}")
+        if not (args.qwen_ref_text or "").strip() and not args.qwen_xvector_only:
+            raise SystemExit(
+                "qwen3-clone requiere --qwen-ref-text (transcripción) o --qwen-xvector-only."
+            )
+    if args.engine == "qwen3-customvoice":
+        if args.qwen_speaker and args.qwen_speaker not in QWEN_SPEAKERS:
+            raise SystemExit(
+                f"Speaker desconocido: {args.qwen_speaker}. Opciones: {', '.join(QWEN_SPEAKERS)}"
+            )
+        if (args.qwen_instruct or "").strip() and str(args.qwen_model or "1.7b").lower() == "0.6b":
+            raise SystemExit("El modelo 0.6B-CustomVoice no soporta --qwen-instruct; use 1.7b.")
 
 
 if __name__ == "__main__":

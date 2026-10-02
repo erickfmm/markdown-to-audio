@@ -6,6 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Mirror opcional para descargas apt más rápidas
+RUN sed -i 's|http://deb.debian.org|http://ftp.br.debian.org|g' /etc/apt/sources.list.d/debian.sources || \
+    sed -i 's|http://deb.debian.org|http://ftp.br.debian.org|g' /etc/apt/sources.list
+
 RUN python3 -m pip install --upgrade pip && \
     python3 -m pip install --no-cache-dir \
     "flask>=3.0" \

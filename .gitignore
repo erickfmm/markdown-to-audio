@@ -10,3 +10,6 @@ build/
 .env/
 venv/
 .venv/
+nohup.out
+*.log
+logs/
