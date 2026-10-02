@@ -23,7 +23,7 @@ The project ships as **three interchangeable frontends over one core service**:
         Browser ──► Flask GUI ──proxy /api/*──► FastAPI ──► JobManager (FIFO)
 ```
 
-**Web GUI features:** drag & drop batch upload or pasted text · engine/language/pause/workers/device options · Qwen3 voice options (model size, premium speaker, style instruction, voice design description, voice cloning via file upload or browser recording) · live per-job progress bars · job history with inline audio player, WAV download, **MP3 download** (converted on the fly and cached on disk) and delete · **history persists across restarts** (read back from the jobs directory, no database) · bilingual interface (ES/EN) · backend health indicator.
+**Web GUI features:** drag & drop batch upload or pasted text · engine/language/pause/workers/device options · Qwen3 voice options (model size, premium speaker, style instruction, voice design description, voice cloning via file upload or browser recording) · live per-job progress bars · **cancel** jobs (queued instantly, running cooperatively — the current fragment finishes) and **resume** canceled jobs from their fragments · job history with inline audio player, WAV download, **MP3 download** (converted on the fly and cached on disk) and delete · **history persists across restarts** (read back from the jobs directory, no database) · bilingual interface (ES/EN) · backend health indicator.
 
 ## Table of contents
 
@@ -302,8 +302,9 @@ How parsing works: each `#`/`##`… heading is announced as its own short paragr
    - With a `qwen3-*` engine, extra options appear: **model size** (1.7B/0.6B), **premium speaker** (customvoice), **style instruction / voice description**, and for `qwen3-clone` a **reference audio** — upload an MP3/WAV or **record from the browser** (🎤), preview it and optionally type its transcript.
    - Browser recording needs `localhost` or HTTPS (microphone access is blocked on plain HTTP remote origins).
 4. Press **Convert** — each file becomes a job with a live progress bar (`done/total` fragments).
-5. When finished: play it inline, download the WAV, download it as **MP3** (the first request converts it with FFmpeg and caches it next to the WAV — later downloads are instant), or delete the job (removes the WAV, the cached MP3 and any fragments).
-6. The history list (newest first) shows **every previous conversion**, including jobs from past server sessions: completed jobs are rediscovered by scanning the jobs directory on each request — no database involved.
+5. Cancel a job with **⏹ Cancel** (queued → instant; running → the current fragment finishes, badge shows "Canceling…" in amber, then "Canceled"). Resume a canceled job with **▶ Resume**: it re-enters the queue and continues from the first missing fragment (previously synthesized fragments are reused). Delete it afterwards if you don't need it.
+6. When finished: play it inline, download the WAV, download it as **MP3** (the first request converts it with FFmpeg and caches it next to the WAV — later downloads are instant), or delete the job (removes the WAV, the cached MP3 and any fragments).
+7. The history list (newest first) shows **every previous conversion**, including jobs from past server sessions: completed jobs are rediscovered by scanning the jobs directory on each request — no database involved.
 
 The header dot shows backend health in real time. The GUI talks only to its own origin (`/api/*`), which Flask transparently proxies to FastAPI — no CORS setup and the backend never needs to be exposed to the network.
 
@@ -331,7 +332,9 @@ Base URL: direct to the backend (`http://localhost:8000`) **or** through the GUI
 | `GET /api/jobs/{id}` | One job: state, progress, options, result URL. |
 | `GET /api/jobs/{id}/audio` | The generated WAV (download/stream). |
 | `GET /api/jobs/{id}/audio.mp3` | The audio as MP3 (192 kbps). Converts with FFmpeg on first request and caches the `.mp3` next to the WAV; subsequent requests serve the cached file. |
-| `DELETE /api/jobs/{id}` | Delete a job and its files from disk (WAV, cached MP3, fragments). |
+| `POST /api/jobs/{id}/cancel` | Cancel a queued (immediate) or running job. Cancellation is cooperative: the fragment being synthesized finishes, the job then moves to `canceled` and its synthesized fragments are kept on disk so it can be resumed. |
+| `POST /api/jobs/{id}/resume` | Re-enqueue a **canceled** job (it runs again with the same id and output directory, reusing the fragments synthesized before the cancellation → resumes from where it stopped). |
+| `DELETE /api/jobs/{id}` | Delete a job and its files from disk (WAV, cached MP3, fragments). Deleting a running job cancels it first and then removes everything. |
 | `POST /api/voice-references` | Upload a reference voice (multipart field `audio`, optional `ref_text`) → normalized mono 24 kHz WAV, reusable across jobs. |
 | `GET /api/voice-references` | List uploaded reference voices. |
 | `GET /api/voice-references/{id}/audio` | Stream a stored reference WAV. |
@@ -360,6 +363,8 @@ curl http://localhost:8000/api/jobs           # list / find the id
 curl http://localhost:8000/api/jobs/<id>      # state + done/total
 curl -OJ http://localhost:8000/api/jobs/<id>/audio      # WAV
 curl -OJ http://localhost:8000/api/jobs/<id>/audio.mp3  # MP3 (converts + caches on first hit)
+curl -X POST http://localhost:8000/api/jobs/<id>/cancel  # cancel (queued: instant, running: cooperative)
+curl -X POST http://localhost:8000/api/jobs/<id>/resume  # resume a canceled job from its fragments
 curl -X DELETE http://localhost:8000/api/jobs/<id>
 ```
 
@@ -391,10 +396,11 @@ curl -X POST http://localhost:8000/api/jobs -H 'Content-Type: application/json' 
 {
   "id": "e9c57ee01cea",
   "name": "demo",
-  "state": "done",                  // queued | running | done | error
+  "state": "done",                  // queued | running | done | error | canceled
   "done": 2,
   "total": 2,
   "error": null,
+  "cancel_requested": false,        // true while a running job is being canceled (cooperative)
   "created_at": 1790631456.2,
   "duration": 17.7,
   "from_disk": false,               // true for jobs rediscovered from the jobs directory
@@ -428,6 +434,7 @@ Validation and limits:
 Semantics:
 
 - Jobs run **one at a time, FIFO** (models are heavy/GPU-bound). Parallelism *within* a job is controlled by `workers`.
+- **Cancellation and resume:** `POST /api/jobs/{id}/cancel` on a queued job takes effect immediately; on a running job it is *cooperative* — the fragment being synthesized finishes, then the job moves to `canceled` (the job reports `cancel_requested: true` in the meantime, and the GUI badge shows "Canceling…"). Canceled jobs keep their per-paragraph fragments on disk, so `POST /api/jobs/{id}/resume` re-enqueues the same job and synthesis picks up from the first missing fragment (cancel/resume can be repeated as many times as needed). Canceled jobs stay in the history (amber badge) until deleted.
 - Active queue state lives **in memory**, but finished jobs are **rediscovered from the jobs directory** on every `GET /api/jobs`: the history survives restarts with no database. Historical jobs report `from_disk: true` and carry no `options` metadata (just the name, date and audio URLs).
 - First job per engine pays the model download; the engine cache then keeps it loaded for the process lifetime.
 - `GET .../audio` returns `409` until the job is `done`; `DELETE` returns `409` while running; unknown ids return `404`. Through the GUI proxy an unreachable backend surfaces as `502`.
@@ -545,9 +552,10 @@ start.sh            # docker | local | hybrid | stop launcher
 
 - **Layering:** `parser` → `service` → frontends (`cli`, `api`, `web`). The web layer must stay import-light: `md_tts.web` depends only on Flask/requests so the frontend image needs no ML stack.
 - **Engine cache:** `service.EngineCache` keeps one engine instance per engine-specific key (see `ENGINE_CACHE_KEY_FIELDS` — e.g. `(device, qwen_model)` for Qwen3). Switching language, speaker or instruction on a cached Qwen3 engine does **not** reload the model: those are applied as runtime attributes (`_apply_runtime_options`), which is safe because jobs run one at a time. Used on every sequential path (CLI and web jobs). With `workers > 1` the pool forks separate processes and each builds its own engine (cache disabled).
+- **Cancellation:** web jobs are executed by `JobManager._run` with an internal fragments directory (per-paragraph WAVs). `service.process_markdown_text` takes a `should_cancel` callback checked at every fragment boundary, raising `OperationCancelled` — the worker catches it, marks the job `canceled` and keeps the fragments (resume support). On success, if the user didn't ask for `save_fragments`, the fragments directory is removed so disk output matches the previous behavior. The CLI keeps its plain behavior (`should_cancel` not used).
 - **Adding an engine:** subclass `TtsEngine` in `tts.py` and register it in `ENGINE_REGISTRY`. Add the name to `cli.py` choices and `service.LANGUAGE_AWARE_ENGINES` if it honors `--language` (plus `ENGINE_CACHE_KEY_FIELDS` if its cache key differs from `(language, device)` and `ENGINE_METADATA` in `tts.py` for UI capabilities). The API (`/api/engines`, validation) picks it up automatically.
 - **GUI i18n:** translation dictionaries live at the top of `web/static/app.js`; the toggle persists via `localStorage` (`mdtts-lang`).
-- **Job lifecycle:** `POST /api/jobs` → `queued` → `running` (progress callbacks update `done/total`) → `done` (with `audio_url`) or `error` (message surfaced in the GUI).
+- **Job lifecycle:** `POST /api/jobs` → `queued` → `running` (progress callbacks update `done/total`) → `done` (with `audio_url`), `error` (message surfaced in the GUI) or `canceled` (via `POST .../cancel`; a canceled job can be re-enqueued with `POST .../resume`).
 
 ## Troubleshooting
 
@@ -561,7 +569,8 @@ start.sh            # docker | local | hybrid | stop launcher
 | Hybrid mode: GUI up but backend "offline" | Backend must bind `0.0.0.0` (default `API_HOST`); the container reaches it via `host.docker.internal` (mapped by compose). |
 | `address already in use` | Another process holds the port — change `PORT` / `API_PORT`. |
 | Old jobs missing from the history | Only folders containing a top-level `*.wav` under `MD_TTS_JOBS_DIR` are listed (jobs that errored before producing audio, or fragments-only folders, are skipped). |
-| `409` on delete or audio download | Job still `running`; wait for `done`. |
+| `409` on delete or audio download | Job still `running`; wait for `done` (or cancel it first). |
+| `409` on cancel/resume | Only queued/running jobs can be canceled; only canceled jobs can be resumed. |
 | `413` on upload | File over the 20 MB limit — split it or paste text as JSON. |
 | CUDA errors | `--device cuda` needs a GPU + CUDA-enabled torch; in Docker also `gpus: all` and the NVIDIA Container Toolkit. |
 | `qwen-tts no está instalado` / `qwen-tts is not installed` | Install the optional extra: `uv sync --extra qwen` or `pip install 'md-tts[qwen]'`. |
@@ -574,7 +583,7 @@ start.sh            # docker | local | hybrid | stop launcher
 - `vibevoice` and `cosyvoice` benefit strongly from GPU; Qwen3 1.7B runs comfortably on ~4 GB VRAM (bf16) and 0.6B on ~2 GB, but CPU also works (slower).
 - `cosyvoice` requires its upstream repository and dependencies; `qwen3-*` requires the optional `qwen` extra.
 - `vibevoice` currently behaves best in English; Spanish quality depends on prompt/content.
-- Job history is file-based (no database): finished jobs are listed from the jobs directory, so jobs run strictly one at a time and interrupted/errored runs leave no history entry.
+- Job history is file-based (no database): finished jobs are listed from the jobs directory, so jobs run strictly one at a time and interrupted/errored runs leave no history entry. Active (queued/running/canceled) jobs live in memory: a server restart drops them, so resume only works within the same server run — canceled jobs whose fragments were kept survive as folders without a WAV (they are simply not listed in the history).
 - The Flask GUI runs on Werkzeug in local mode — fine for personal/LAN use, use the gunicorn frontend container for anything heavier.
 
 ## Model licenses
@@ -663,7 +672,7 @@ Opciones principales: `--engine`, `--language` (es/en), `--pause-ms` (500), `--d
 
 ## GUI web
 
-Interfaz con carga por lotes o texto pegado, progreso en vivo, historial con reproductor, descarga WAV, **descarga MP3** (convierte con FFmpeg al vuelo y lo cachea en disco), e eliminación. El historial incluye **todas las conversiones anteriores** (se re-lee del directorio de trabajos, sin base de datos) e interfaz ES/EN. Con los motores `qwen3-*` aparecen opciones extra: tamaño de modelo, voz premium, instrucción de estilo, descripción de voz y clonación subiendo un mp3/wav o grabando desde el navegador (requiere localhost o HTTPS). El frontend Flask proxya `/api/*` al backend FastAPI (sin CORS, el backend no queda expuesto).
+Interfaz con carga por lotes o texto pegado, progreso en vivo, historial con reproductor, descarga WAV, **descarga MP3** (convierte con FFmpeg al vuelo y lo cachea en disco), **cancelación** (en cola instantánea, en ejecución cooperativa) y **reanudación** de cancelados desde sus fragmentos, e eliminación. El historial incluye **todas las conversiones anteriores** (se re-lee del directorio de trabajos, sin base de datos) e interfaz ES/EN. Con los motores `qwen3-*` aparecen opciones extra: tamaño de modelo, voz premium, instrucción de estilo, descripción de voz y clonación subiendo un mp3/wav o grabando desde el navegador (requiere localhost o HTTPS). El frontend Flask proxya `/api/*` al backend FastAPI (sin CORS, el backend no queda expuesto).
 
 ```bash
 uv sync
@@ -695,7 +704,9 @@ O con `start.sh` (variables: `HOST`, `PORT`, `API_HOST`, `API_PORT`):
 | `GET /api/jobs/{id}` | Estado y progreso (`done`/`total`). |
 | `GET /api/jobs/{id}/audio` | Descargar el WAV generado. |
 | `GET /api/jobs/{id}/audio.mp3` | Descargar como MP3 (192 kbps): convierte con FFmpeg en la primera petición y cachea el `.mp3` junto al WAV. |
-| `DELETE /api/jobs/{id}` | Eliminar trabajo y archivos (WAV, MP3 cacheado, fragmentos). |
+| `POST /api/jobs/{id}/cancel` | Cancelar un job en cola (instantáneo) o en ejecución (cooperativa: el fragmento en curso termina y el job pasa a `canceled` conservando sus fragmentos para poder reanudarse). |
+| `POST /api/jobs/{id}/resume` | Re-encolar un job **cancelado** (mismo id y directorio: reutiliza los fragmentos ya sintetizados y continúa donde se quedó). |
+| `DELETE /api/jobs/{id}` | Eliminar trabajo y archivos (WAV, MP3 cacheado, fragmentos). Eliminar uno en ejecución lo cancela primero y luego borra todo. |
 | `POST /api/voice-references` | Subir voz de referencia (multipart `audio`, `ref_text` opcional) para clonación. |
 | `GET /api/voice-references` | Listar voces de referencia. |
 | `GET /api/voice-references/{id}/audio` | Reproducir/descargar un WAV de referencia. |
@@ -709,14 +720,16 @@ curl -X POST http://localhost:8000/api/jobs -H 'Content-Type: application/json' 
 # Lote por multipart
 curl -X POST http://localhost:8000/api/jobs -F files=@cap1.md -F files=@cap2.md -F engine=kokoro
 
-# Estado, descarga y borrado
+# Estado, descarga, cancelar y borrado
 curl http://localhost:8000/api/jobs/<id>
 curl -OJ http://localhost:8000/api/jobs/<id>/audio      # WAV
 curl -OJ http://localhost:8000/api/jobs/<id>/audio.mp3  # MP3 (convierte y cachea la primera vez)
+curl -X POST http://localhost:8000/api/jobs/<id>/cancel  # cancelar (cola: instantáneo; ejecución: cooperativo)
+curl -X POST http://localhost:8000/api/jobs/<id>/resume  # reanudar un job cancelado desde sus fragmentos
 curl -X DELETE http://localhost:8000/api/jobs/<id>
 ```
 
-Notas: los trabajos se procesan de uno en uno (FIFO); el historial de trabajos terminados se lee del directorio de salida (sin base de datos: sobrevive a reinicios; los activos viven en memoria); el primer trabajo por motor descarga el modelo y luego queda en caché; archivos ≤ 20 MB.
+Notas: los trabajos se procesan de uno en uno (FIFO); el historial de trabajos terminados se lee del directorio de salida (sin base de datos: sobrevive a reinicios; los activos viven en memoria); el primer trabajo por motor descarga el modelo y luego queda en caché; archivos ≤ 20 MB. Los trabajos activos en cola/ejecución/cancelados viven en memoria: al reiniciar el servidor desaparecen (la reanudación solo funciona en la misma ejecución del servidor). Cancelar un job en ejecución es cooperativo: el fragmento actual termina y los fragmentos previos quedan en disco para poder reanudarlo.
 
 ## Docker (CLI)
 
@@ -735,7 +748,8 @@ docker run --rm -v "$(pwd):/app" md-tts --input-dir modificacion1 --output-dir o
 | Híbrido sin conexión al backend | El backend debe escuchar en `0.0.0.0` (`API_HOST` por defecto). |
 | Puerto ocupado | Cambia `PORT`/`API_PORT`. |
 | Conversión vieja no aparece en el historial | Solo se listan las carpetas con un `*.wav` en el nivel superior de `MD_TTS_JOBS_DIR` (trabajos fallidos o solo-fragmentos se omiten). |
-| 409 al descargar/borrar | El trabajo sigue en ejecución. |
+| 409 al descargar/borrar | El trabajo sigue en ejecución; espera a `done` o cancélalo antes. |
+| 409 al cancelar/reanudar | Solo se cancelan trabajos en cola o en ejecución; solo se reanudan los cancelados. |
 
 ## Licencias de modelos
 

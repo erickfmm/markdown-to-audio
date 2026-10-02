@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .. import service
+from ..service import OperationCancelled
 
 logger = logging.getLogger("md_tts.api")
 
@@ -31,6 +32,7 @@ class JobState(str, Enum):
     RUNNING = "running"
     DONE = "done"
     ERROR = "error"
+    CANCELED = "canceled"
 
 
 @dataclass
@@ -93,6 +95,10 @@ class Job:
     done: int = 0
     total: int = 0
     error: Optional[str] = None
+    #: True cuando alguien pidió cancelar un job running (aún no efectivo:
+    #: la cancelación es cooperativa y surte efecto al terminar el fragmento
+    #: en curso). Visible para que la UI muestre "cancelando…" mientras tanto.
+    cancel_requested: bool = False
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
@@ -112,6 +118,7 @@ class Job:
             "done": self.done,
             "total": self.total,
             "error": self.error,
+            "cancel_requested": self.cancel_requested,
             "created_at": self.created_at,
             "duration": duration,
             "from_disk": self.from_disk,
@@ -192,15 +199,89 @@ class JobManager:
                 job = self._disk_job(job_id)
                 if job is None:
                     return "not_found"
-            elif job.state is JobState.RUNNING:
-                return "running"
+            elif job.state in (JobState.RUNNING, JobState.QUEUED, JobState.CANCELED):
+                pass  # los tres estados admiten delete: running se cancela abajo
             else:
                 del self._jobs[job_id]
 
+        if job.state is JobState.RUNNING:
+            # Cancela de forma cooperativa y espera (acotado) a que el worker
+            # suelte el job; luego cae en el borrado normal.
+            self.cancel(job_id)
+            if not self._wait_not_busy(job_id, timeout=30.0):
+                return "running"
+
+        with self._lock:
+            self._jobs.pop(job_id, None)
         job_dir = self._job_dir(job_id)
         if job_dir.exists():
             shutil.rmtree(job_dir, ignore_errors=True)
         return None
+
+    def cancel(self, job_id: str) -> Optional[str]:
+        """Pide cancelar un job. Retorna None si OK o el motivo del rechazo.
+
+        - **queued**: se cancela al instante (no llegará a ejecutarse).
+        - **running**: solo se marca la petición; el worker la detecta en el
+          siguiente fragmento (checkpoints cooperativos en ``service``) y
+          marca el job como ``canceled``. Los fragmentos ya generados quedan
+          en disco y permiten reanudar más tarde.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return "not_found"
+            if job.state is JobState.QUEUED:
+                # Atómico: aún no está en ejecución, el worker lo saltará.
+                job.state = JobState.CANCELED
+                job.cancel_requested = False
+                job.finished_at = time.time()
+                logger.info("Job %s cancelado en cola", job_id)
+                return None
+            if job.state is JobState.RUNNING:
+                if job.cancel_requested:
+                    return None  # ya pedimos cancelar: idempotente
+                job.cancel_requested = True
+                logger.info("Job %s: cancelación solicitada (cooperativa)", job_id)
+                return None
+            return "not_cancelable"  # done / error / canceled
+
+    def resume(self, job_id: str) -> Optional[str]:
+        """Re-encola un job cancelado, reanudando desde sus fragmentos.
+
+        Solo jobs ``canceled`` que sigan en memoria (con contenido). Los
+        fragmentos de la ejecución anterior se reutilizan automáticamente:
+        el directorio de fragments es el mismo, por lo que la síntesis
+        continúa desde el primer párrafo no completado.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return "not_found"
+            if job.state is not JobState.CANCELED:
+                return "not_cancelable"  # solo los cancelados se reanudan
+            job.state = JobState.QUEUED
+            job.cancel_requested = False
+            job.done = 0
+            job.total = 0
+            job.error = None
+            job.started_at = None
+            job.finished_at = None
+        # El id es el mismo: output_dir (y fragments/) no cambian.
+        self._queue.put(job_id)
+        logger.info("Job %s re-encolado (reanudar desde fragmentos)", job_id)
+        return None
+
+    def _wait_not_busy(self, job_id: str, timeout: float) -> bool:
+        """Espera (con polling) a que el job deje de estar running."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if job is None or job.state is not JobState.RUNNING:
+                    return True
+            time.sleep(0.1)
+        return False
 
     # -- Escaneo de disco --------------------------------------------
 
@@ -249,14 +330,28 @@ class JobManager:
                 job = self._jobs.get(job_id)
             if job is None:
                 continue  # fue eliminado mientras estaba en cola
-
-            self._update(job, state=JobState.RUNNING, started_at=time.time())
+            with self._lock:
+                # Transición QUEUED→RUNNING bajo lock: evita la carrera con
+                # un cancel() sobre un job todavía en cola.
+                if job.state is JobState.CANCELED:
+                    continue  # cancelado en cola: el worker lo salta
+                if job.state is not JobState.QUEUED:
+                    continue
+                job.state = JobState.RUNNING
+                job.started_at = time.time()
             logger.info("Job %s iniciado: %s", job.id, job.name)
 
             def report(done: int, total: int, _job: Job = job) -> None:
                 self._update(_job, done=done, total=total)
 
+            def cancelled(_job: Job = job) -> bool:
+                with self._lock:
+                    return _job.cancel_requested
+
             try:
+                # Los jobs del gestor SIEMPRE usan un directorio de fragmentos
+                # (save_fragments interno): cada párrafo completado queda en
+                # disco y cualquier job cancelado es reanudable después.
                 output_path = service.process_markdown_text(
                     name=job.name,
                     content=job.content,
@@ -266,7 +361,7 @@ class JobManager:
                     pause_ms=job.options.pause_ms,
                     device=job.options.device,
                     workers=job.options.workers,
-                    save_fragments=job.options.save_fragments,
+                    save_fragments=True,
                     qwen_model=job.options.qwen_model,
                     qwen_speaker=job.options.qwen_speaker,
                     qwen_instruct=job.options.qwen_instruct,
@@ -275,9 +370,25 @@ class JobManager:
                     qwen_xvector_only=job.options.qwen_xvector_only,
                     progress_callback=report,
                     show_progress=False,
+                    should_cancel=cancelled,
                 )
                 self._update(job, state=JobState.DONE, output_path=output_path, finished_at=time.time())
                 logger.info("Job %s completado: %s", job.id, output_path)
+                if not job.options.save_fragments:
+                    # El usuario no pidió los fragmentos: limpiarlos para no
+                    # ocupar disco (el WAV fusionado ya está en job_dir). Los
+                    # jobs cancelados conservan los suyos (base de la
+                    # reanudación); cancelar no llega a escribir el WAV, así
+                    # que no queda ningún artefacto parcial.
+                    shutil.rmtree(self.jobs_dir / job.id / "fragments", ignore_errors=True)
+            except OperationCancelled:
+                self._update(
+                    job,
+                    state=JobState.CANCELED,
+                    cancel_requested=False,
+                    finished_at=time.time(),
+                )
+                logger.info("Job %s cancelado por el usuario (fragmentos conservados)", job.id)
             except Exception as exc:  # noqa: BLE001 - el worker nunca debe morir
                 logger.exception("Job %s falló", job.id)
                 self._update(job, state=JobState.ERROR, error=str(exc), finished_at=time.time())

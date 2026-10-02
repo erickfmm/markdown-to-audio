@@ -74,6 +74,24 @@ RUNTIME_OPTION_FIELDS = (
 )
 
 ProgressCallback = Callable[[int, int], None]
+CancelCheck = Callable[[], bool]
+
+
+class OperationCancelled(Exception):
+    """Conversión cancelada (checkpoints cooperativos vía ``should_cancel``).
+
+    La lanza :func:`process_markdown_text` al detectar que el gestor pidió
+    cancelar; el gestor (JobManager) la captura para marcar el job como
+    ``canceled``. Los fragmentos ya sintetizados quedan en disco y permiten
+    reanudar más tarde con ``save_fragments``.
+    """
+
+
+def _check_cancel(should_cancel: Optional[CancelCheck]) -> None:
+    """Lanza OperationCancelled si el gestor pidió cancelar."""
+
+    if should_cancel is not None and should_cancel():
+        raise OperationCancelled("Conversión cancelada por el usuario.")
 
 
 class EngineCache:
@@ -226,12 +244,21 @@ def process_markdown_text(
     progress_callback: Optional[ProgressCallback] = None,
     show_progress: bool = True,
     use_cache: bool = True,
+    should_cancel: Optional[CancelCheck] = None,
 ) -> Path:
     """Convierte texto Markdown a un WAV y retorna la ruta de salida.
 
     ``progress_callback(done, total)`` se invoca al inicio (0, total) y tras
     cada fragmento completado.
+
+    ``should_cancel()`` se consulta en cada fragmento (antes de sintetizar en
+    modo secuencial, tras recoger cada resultado en paralelo); si retorna True
+    se lanza :class:`OperationCancelled`. La cancelación es cooperativa: el
+    fragmento en curso termina, los fragmentos previos quedan en disco (si
+    ``save_fragments``) y el WAV final no se llega a escribir.
     """
+    if should_cancel is not None and should_cancel():
+        raise OperationCancelled("Conversión cancelada antes de empezar.")
     paragraphs = md_parser.split_markdown_text(content)
     total = len(paragraphs)
     logger.info("%s -> %d fragmentos", name, total)
@@ -278,12 +305,17 @@ def process_markdown_text(
                     segments.append(result)
                 if progress_callback:
                     progress_callback(done, total)
+                # Checkpoint paralelo: al propagarse la excepción el ``with``
+                # hace terminate() del pool y aborta los subprocess pendientes.
+                _check_cancel(should_cancel)
     else:
         # Procesamiento secuencial (con caché de engines)
         iterator = paragraphs
         if show_progress:
             iterator = tqdm(paragraphs, desc=name, unit="p")  # type: ignore[assignment]
         for done, para in enumerate(iterator, start=1):
+            # Checkpoint secuencial: antes de sintetizar el siguiente fragmento.
+            _check_cancel(should_cancel)
             idx, seg = process_paragraph(
                 para,
                 engine_name=engine_name,

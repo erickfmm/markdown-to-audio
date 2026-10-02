@@ -29,6 +29,11 @@ const I18N = {
     delete: "Eliminar",
     download: "Descargar",
     downloadMp3: "⬇ MP3",
+    cancel: "Cancelar",
+    cancelJob: "⏹ Cancelar",
+    canceling: "Cancelando…",
+    canceled: "Cancelado",
+    resume: "▶ Reanudar",
     mp3Hint: "Convierte a MP3 (192 kbps) y descarga. La primera vez tarda unos segundos; luego queda en caché.",
     fragments: "fragmentos",
     formErrorFiles: "Selecciona al menos un archivo o pega texto.",
@@ -83,6 +88,11 @@ const I18N = {
     delete: "Delete",
     download: "Download",
     downloadMp3: "⬇ MP3",
+    cancel: "Cancel",
+    cancelJob: "⏹ Cancel",
+    canceling: "Canceling…",
+    canceled: "Canceled",
+    resume: "▶ Resume",
     mp3Hint: "Converts to MP3 (192 kbps) and downloads. The first time takes a few seconds; then it's cached.",
     fragments: "fragments",
     formErrorFiles: "Select at least one file or paste some text.",
@@ -412,6 +422,9 @@ async function refreshJobs() {
 }
 
 function schedulePoll() {
+  // queued/running ya cubren el caso cancel_requested (el job sigue activo
+  // hasta que el worker marca canceled); el polling rápido (1.5 s) refresca
+  // el badge "Cancelando…" sin demora.
   const active = jobs.some((job) => job.state === "queued" || job.state === "running");
   clearTimeout(pollTimer);
   pollTimer = setTimeout(refreshJobs, active ? 1500 : 5000);
@@ -432,9 +445,14 @@ function jobNode(job) {
 
   const badge = document.createElement("span");
   badge.className = `badge ${job.state}`;
-  badge.textContent = t(
-    job.state === "error" ? "errorState" : job.state === "queued" ? "queued" : job.state
-  );
+  if (job.state === "running" && job.cancel_requested) {
+    badge.classList.add("canceling");
+    badge.textContent = t("canceling");
+  } else {
+    badge.textContent = t(
+      job.state === "error" ? "errorState" : job.state === "queued" ? "queued" : job.state
+    );
+  }
   head.appendChild(badge);
 
   const meta = document.createElement("span");
@@ -495,13 +513,41 @@ function jobNode(job) {
     li.appendChild(actions);
   }
 
-  if (job.state !== "running") {
+  if (job.state !== "running" || job.cancel_requested) {
     const del = document.createElement("button");
     del.type = "button";
     del.className = "btn danger";
     del.textContent = `✕ ${t("delete")}`;
     del.addEventListener("click", () => deleteJob(job.id));
     (li.querySelector(".job-actions") || li).appendChild(del);
+  }
+
+  // Cancelar: en cola (efecto inmediato) o en ejecución (cooperativa).
+  if (job.state === "queued" || job.state === "running") {
+    const actions = document.createElement("div");
+    actions.className = "job-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn warn";
+    cancel.textContent = t("cancelJob");
+    cancel.title = t("cancel");
+    cancel.disabled = job.cancel_requested === true;
+    cancel.addEventListener("click", () => cancelJob(job.id));
+    actions.appendChild(cancel);
+    li.appendChild(actions);
+  }
+
+  // Reanudar: solo jobs cancelados (los fragmentos quedaron en disco).
+  if (job.state === "canceled") {
+    const actions = document.createElement("div");
+    actions.className = "job-actions";
+    const resume = document.createElement("button");
+    resume.type = "button";
+    resume.className = "btn link";
+    resume.textContent = t("resume");
+    resume.addEventListener("click", () => resumeJob(job.id));
+    actions.appendChild(resume);
+    li.appendChild(actions);
   }
 
   return li;
@@ -517,6 +563,24 @@ function renderJobs() {
 async function deleteJob(id) {
   try {
     await fetchJson(`/api/jobs/${id}`, { method: "DELETE" });
+  } catch (_) {
+    /* ignorado: el polling reconciliará el estado */
+  }
+  refreshJobs();
+}
+
+async function cancelJob(id) {
+  try {
+    await fetchJson(`/api/jobs/${id}/cancel`, { method: "POST" });
+  } catch (_) {
+    /* ignorado: el polling reconciliará el estado */
+  }
+  refreshJobs();
+}
+
+async function resumeJob(id) {
+  try {
+    await fetchJson(`/api/jobs/${id}/resume`, { method: "POST" });
   } catch (_) {
     /* ignorado: el polling reconciliará el estado */
   }

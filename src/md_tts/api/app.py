@@ -425,8 +425,26 @@ def create_app(
         if result == "not_found":
             raise HTTPException(status_code=404, detail=f"Job no encontrado: {job_id}")
         if result == "running":
-            raise HTTPException(status_code=409, detail="No se puede eliminar un job en ejecución.")
+            raise HTTPException(status_code=409, detail="No se pudo cancelar el job en ejecución a tiempo.")
         return {"deleted": job_id}
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str) -> dict:
+        result = manager.cancel(job_id)
+        if result == "not_found":
+            raise HTTPException(status_code=404, detail=f"Job no encontrado: {job_id}")
+        if result == "not_cancelable":
+            raise HTTPException(status_code=409, detail="Solo se pueden cancelar jobs en cola o en ejecución.")
+        return {"canceled": job_id, "job": manager.get(job_id).to_dict()}
+
+    @app.post("/api/jobs/{job_id}/resume")
+    def resume_job(job_id: str) -> dict:
+        result = manager.resume(job_id)
+        if result == "not_found":
+            raise HTTPException(status_code=404, detail=f"Job no encontrado: {job_id}")
+        if result == "not_cancelable":
+            raise HTTPException(status_code=409, detail="Solo se pueden reanudar jobs cancelados.")
+        return {"resumed": job_id, "job": manager.get(job_id).to_dict()}
 
     return app
 
