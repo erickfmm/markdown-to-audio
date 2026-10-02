@@ -28,6 +28,8 @@ const I18N = {
     errorState: "Error",
     delete: "Eliminar",
     download: "Descargar",
+    downloadMp3: "⬇ MP3",
+    mp3Hint: "Convierte a MP3 (192 kbps) y descarga. La primera vez tarda unos segundos; luego queda en caché.",
     fragments: "fragmentos",
     formErrorFiles: "Selecciona al menos un archivo o pega texto.",
     formErrorName: "Escribe un nombre para el documento pegado.",
@@ -80,6 +82,8 @@ const I18N = {
     errorState: "Error",
     delete: "Delete",
     download: "Download",
+    downloadMp3: "⬇ MP3",
+    mp3Hint: "Converts to MP3 (192 kbps) and downloads. The first time takes a few seconds; then it's cached.",
     fragments: "fragments",
     formErrorFiles: "Select at least one file or paste some text.",
     formErrorName: "Write a name for the pasted document.",
@@ -142,7 +146,15 @@ function fmtDuration(seconds) {
 
 function fmtTime(epoch) {
   if (!epoch) return "";
-  return new Date(epoch * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const date = new Date(epoch * 1000);
+  const now = new Date();
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (sameDay) return time;
+  return date.toLocaleDateString([], { day: "numeric", month: "short" }) + " " + time;
 }
 
 async function fetchJson(url, options) {
@@ -427,7 +439,8 @@ function jobNode(job) {
 
   const meta = document.createElement("span");
   meta.className = "job-meta";
-  const bits = [job.options.engine, fmtTime(job.created_at)];
+  const engineLabel = job.options && job.options.engine ? job.options.engine : "";
+  const bits = engineLabel ? [engineLabel, fmtTime(job.created_at)] : [fmtTime(job.created_at)];
   if (job.total > 0) bits.push(`${job.done}/${job.total} ${t("fragments")}`);
   if (job.state === "done" && job.duration != null) bits.push(fmtDuration(job.duration));
   meta.textContent = bits.join(" · ");
@@ -468,6 +481,16 @@ function jobNode(job) {
     download.download = job.filename || `${job.name}.wav`;
     download.textContent = t("download");
     actions.appendChild(download);
+
+    if (job.mp3_url) {
+      const downloadMp3 = document.createElement("a");
+      downloadMp3.className = "btn link";
+      downloadMp3.href = job.mp3_url;
+      downloadMp3.download = (job.filename || `${job.name}.wav`).replace(/\.wav$/i, ".mp3");
+      downloadMp3.textContent = t("downloadMp3");
+      downloadMp3.title = t("mp3Hint");
+      actions.appendChild(downloadMp3);
+    }
 
     li.appendChild(actions);
   }

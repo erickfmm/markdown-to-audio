@@ -23,7 +23,7 @@ The project ships as **three interchangeable frontends over one core service**:
         Browser ──► Flask GUI ──proxy /api/*──► FastAPI ──► JobManager (FIFO)
 ```
 
-**Web GUI features:** drag & drop batch upload or pasted text · engine/language/pause/workers/device options · Qwen3 voice options (model size, premium speaker, style instruction, voice design description, voice cloning via file upload or browser recording) · live per-job progress bars · job history with inline audio player, download and delete · bilingual interface (ES/EN) · backend health indicator.
+**Web GUI features:** drag & drop batch upload or pasted text · engine/language/pause/workers/device options · Qwen3 voice options (model size, premium speaker, style instruction, voice design description, voice cloning via file upload or browser recording) · live per-job progress bars · job history with inline audio player, WAV download, **MP3 download** (converted on the fly and cached on disk) and delete · **history persists across restarts** (read back from the jobs directory, no database) · bilingual interface (ES/EN) · backend health indicator.
 
 ## Table of contents
 
@@ -302,7 +302,8 @@ How parsing works: each `#`/`##`… heading is announced as its own short paragr
    - With a `qwen3-*` engine, extra options appear: **model size** (1.7B/0.6B), **premium speaker** (customvoice), **style instruction / voice description**, and for `qwen3-clone` a **reference audio** — upload an MP3/WAV or **record from the browser** (🎤), preview it and optionally type its transcript.
    - Browser recording needs `localhost` or HTTPS (microphone access is blocked on plain HTTP remote origins).
 4. Press **Convert** — each file becomes a job with a live progress bar (`done/total` fragments).
-5. When finished: play it inline, download the WAV, or delete the job. The history list (newest first) survives across submissions for the lifetime of the backend process.
+5. When finished: play it inline, download the WAV, download it as **MP3** (the first request converts it with FFmpeg and caches it next to the WAV — later downloads are instant), or delete the job (removes the WAV, the cached MP3 and any fragments).
+6. The history list (newest first) shows **every previous conversion**, including jobs from past server sessions: completed jobs are rediscovered by scanning the jobs directory on each request — no database involved.
 
 The header dot shows backend health in real time. The GUI talks only to its own origin (`/api/*`), which Flask transparently proxies to FastAPI — no CORS setup and the backend never needs to be exposed to the network.
 
@@ -326,10 +327,11 @@ Base URL: direct to the backend (`http://localhost:8000`) **or** through the GUI
 | `GET /api/health` | Liveness check → `{"status": "ok"}` |
 | `GET /api/engines` | Available engines + language support + capability metadata (`variants`, `speakers`, `supports_instruct`, `supports_voice_clone`, …). |
 | `POST /api/jobs` | Create job(s). Multipart (batch) or JSON (single). |
-| `GET /api/jobs` | All jobs, newest first. |
+| `GET /api/jobs` | All jobs, newest first (in-memory jobs **plus** finished jobs rediscovered from the jobs directory). |
 | `GET /api/jobs/{id}` | One job: state, progress, options, result URL. |
 | `GET /api/jobs/{id}/audio` | The generated WAV (download/stream). |
-| `DELETE /api/jobs/{id}` | Delete a job and its files from disk. |
+| `GET /api/jobs/{id}/audio.mp3` | The audio as MP3 (192 kbps). Converts with FFmpeg on first request and caches the `.mp3` next to the WAV; subsequent requests serve the cached file. |
+| `DELETE /api/jobs/{id}` | Delete a job and its files from disk (WAV, cached MP3, fragments). |
 | `POST /api/voice-references` | Upload a reference voice (multipart field `audio`, optional `ref_text`) → normalized mono 24 kHz WAV, reusable across jobs. |
 | `GET /api/voice-references` | List uploaded reference voices. |
 | `GET /api/voice-references/{id}/audio` | Stream a stored reference WAV. |
@@ -356,7 +358,8 @@ curl -X POST http://localhost:8000/api/jobs \
 ```bash
 curl http://localhost:8000/api/jobs           # list / find the id
 curl http://localhost:8000/api/jobs/<id>      # state + done/total
-curl -OJ http://localhost:8000/api/jobs/<id>/audio
+curl -OJ http://localhost:8000/api/jobs/<id>/audio      # WAV
+curl -OJ http://localhost:8000/api/jobs/<id>/audio.mp3  # MP3 (converts + caches on first hit)
 curl -X DELETE http://localhost:8000/api/jobs/<id>
 ```
 
@@ -394,9 +397,11 @@ curl -X POST http://localhost:8000/api/jobs -H 'Content-Type: application/json' 
   "error": null,
   "created_at": 1790631456.2,
   "duration": 17.7,
+  "from_disk": false,               // true for jobs rediscovered from the jobs directory
   "options": {"engine": "mms", "language": "es", "pause_ms": 500,
                "device": null, "workers": 1, "save_fragments": false},
   "audio_url": "/api/jobs/e9c57ee01cea/audio",
+  "mp3_url": "/api/jobs/e9c57ee01cea/audio.mp3",
   "filename": "demo.wav"
 }
 ```
@@ -423,9 +428,10 @@ Validation and limits:
 Semantics:
 
 - Jobs run **one at a time, FIFO** (models are heavy/GPU-bound). Parallelism *within* a job is controlled by `workers`.
-- History and queue live **in memory**: restarting the backend clears the list (WAV files stay on disk in `--jobs-dir`).
+- Active queue state lives **in memory**, but finished jobs are **rediscovered from the jobs directory** on every `GET /api/jobs`: the history survives restarts with no database. Historical jobs report `from_disk: true` and carry no `options` metadata (just the name, date and audio URLs).
 - First job per engine pays the model download; the engine cache then keeps it loaded for the process lifetime.
 - `GET .../audio` returns `409` until the job is `done`; `DELETE` returns `409` while running; unknown ids return `404`. Through the GUI proxy an unreachable backend surfaces as `502`.
+- `GET .../audio.mp3` needs FFmpeg (already included in the Docker images); the MP3 is cached next to the WAV until the job is deleted.
 
 ## Docker
 
@@ -554,7 +560,7 @@ start.sh            # docker | local | hybrid | stop launcher
 | `502` from the GUI proxy | Backend unreachable from the frontend process (down, wrong URL, or firewall). |
 | Hybrid mode: GUI up but backend "offline" | Backend must bind `0.0.0.0` (default `API_HOST`); the container reaches it via `host.docker.internal` (mapped by compose). |
 | `address already in use` | Another process holds the port — change `PORT` / `API_PORT`. |
-| History empty after restart | Expected: job state is in-memory. Files remain under `MD_TTS_JOBS_DIR`. |
+| Old jobs missing from the history | Only folders containing a top-level `*.wav` under `MD_TTS_JOBS_DIR` are listed (jobs that errored before producing audio, or fragments-only folders, are skipped). |
 | `409` on delete or audio download | Job still `running`; wait for `done`. |
 | `413` on upload | File over the 20 MB limit — split it or paste text as JSON. |
 | CUDA errors | `--device cuda` needs a GPU + CUDA-enabled torch; in Docker also `gpus: all` and the NVIDIA Container Toolkit. |
@@ -568,7 +574,7 @@ start.sh            # docker | local | hybrid | stop launcher
 - `vibevoice` and `cosyvoice` benefit strongly from GPU; Qwen3 1.7B runs comfortably on ~4 GB VRAM (bf16) and 0.6B on ~2 GB, but CPU also works (slower).
 - `cosyvoice` requires its upstream repository and dependencies; `qwen3-*` requires the optional `qwen` extra.
 - `vibevoice` currently behaves best in English; Spanish quality depends on prompt/content.
-- Job history is per-process (no persistence); jobs run strictly one at a time.
+- Job history is file-based (no database): finished jobs are listed from the jobs directory, so jobs run strictly one at a time and interrupted/errored runs leave no history entry.
 - The Flask GUI runs on Werkzeug in local mode — fine for personal/LAN use, use the gunicorn frontend container for anything heavier.
 
 ## Model licenses
@@ -657,7 +663,7 @@ Opciones principales: `--engine`, `--language` (es/en), `--pause-ms` (500), `--d
 
 ## GUI web
 
-Interfaz con carga por lotes o texto pegado, progreso en vivo, historial con reproductor/descarga/eliminar, e interfaz ES/EN. Con los motores `qwen3-*` aparecen opciones extra: tamaño de modelo, voz premium, instrucción de estilo, descripción de voz y clonación subiendo un mp3/wav o grabando desde el navegador (requiere localhost o HTTPS). El frontend Flask proxya `/api/*` al backend FastAPI (sin CORS, el backend no queda expuesto).
+Interfaz con carga por lotes o texto pegado, progreso en vivo, historial con reproductor, descarga WAV, **descarga MP3** (convierte con FFmpeg al vuelo y lo cachea en disco), e eliminación. El historial incluye **todas las conversiones anteriores** (se re-lee del directorio de trabajos, sin base de datos) e interfaz ES/EN. Con los motores `qwen3-*` aparecen opciones extra: tamaño de modelo, voz premium, instrucción de estilo, descripción de voz y clonación subiendo un mp3/wav o grabando desde el navegador (requiere localhost o HTTPS). El frontend Flask proxya `/api/*` al backend FastAPI (sin CORS, el backend no queda expuesto).
 
 ```bash
 uv sync
@@ -685,10 +691,11 @@ O con `start.sh` (variables: `HOST`, `PORT`, `API_HOST`, `API_PORT`):
 | `GET /api/health` | Comprobación de estado. |
 | `GET /api/engines` | Motores disponibles. |
 | `POST /api/jobs` | Crear trabajo(s): multipart con `files` (lotes) o JSON `{name, content, …}`. |
-| `GET /api/jobs` | Historial (más reciente primero). |
+| `GET /api/jobs` | Historial (más reciente primero): trabajos activos **y** conversiones anteriores redescubiertas del directorio de trabajos. |
 | `GET /api/jobs/{id}` | Estado y progreso (`done`/`total`). |
 | `GET /api/jobs/{id}/audio` | Descargar el WAV generado. |
-| `DELETE /api/jobs/{id}` | Eliminar trabajo y archivos. |
+| `GET /api/jobs/{id}/audio.mp3` | Descargar como MP3 (192 kbps): convierte con FFmpeg en la primera petición y cachea el `.mp3` junto al WAV. |
+| `DELETE /api/jobs/{id}` | Eliminar trabajo y archivos (WAV, MP3 cacheado, fragmentos). |
 | `POST /api/voice-references` | Subir voz de referencia (multipart `audio`, `ref_text` opcional) para clonación. |
 | `GET /api/voice-references` | Listar voces de referencia. |
 | `GET /api/voice-references/{id}/audio` | Reproducir/descargar un WAV de referencia. |
@@ -704,11 +711,12 @@ curl -X POST http://localhost:8000/api/jobs -F files=@cap1.md -F files=@cap2.md 
 
 # Estado, descarga y borrado
 curl http://localhost:8000/api/jobs/<id>
-curl -OJ http://localhost:8000/api/jobs/<id>/audio
+curl -OJ http://localhost:8000/api/jobs/<id>/audio      # WAV
+curl -OJ http://localhost:8000/api/jobs/<id>/audio.mp3  # MP3 (convierte y cachea la primera vez)
 curl -X DELETE http://localhost:8000/api/jobs/<id>
 ```
 
-Notas: los trabajos se procesan de uno en uno (FIFO); el historial vive en memoria y se reinicia con el proceso (los WAV quedan en disco); el primer trabajo por motor descarga el modelo y luego queda en caché; archivos ≤ 20 MB.
+Notas: los trabajos se procesan de uno en uno (FIFO); el historial de trabajos terminados se lee del directorio de salida (sin base de datos: sobrevive a reinicios; los activos viven en memoria); el primer trabajo por motor descarga el modelo y luego queda en caché; archivos ≤ 20 MB.
 
 ## Docker (CLI)
 
@@ -726,7 +734,7 @@ docker run --rm -v "$(pwd):/app" md-tts --input-dir modificacion1 --output-dir o
 | GUI en "API sin conexión" / 502 | Backend caído o `MD_TTS_API_URL` incorrecto; verifica `/api/health`. |
 | Híbrido sin conexión al backend | El backend debe escuchar en `0.0.0.0` (`API_HOST` por defecto). |
 | Puerto ocupado | Cambia `PORT`/`API_PORT`. |
-| Historial vacío tras reiniciar | Esperado: el estado es en memoria. |
+| Conversión vieja no aparece en el historial | Solo se listan las carpetas con un `*.wav` en el nivel superior de `MD_TTS_JOBS_DIR` (trabajos fallidos o solo-fragmentos se omiten). |
 | 409 al descargar/borrar | El trabajo sigue en ejecución. |
 
 ## Licencias de modelos

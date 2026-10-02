@@ -11,6 +11,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
+from pydub import AudioSegment
 
 from .. import service
 from ..tts import (
@@ -72,6 +73,37 @@ def _validate_device(device) -> None:
             status_code=400,
             detail=f"Device inválido: {device}. Use 'auto', 'cpu' o 'cuda'.",
         )
+
+
+def _mp3_path_for(wav_path: Path) -> Path:
+    """Ruta del MP3 cacheado junto al WAV (mismo nombre, extensión .mp3)."""
+
+    return wav_path.with_suffix(".mp3")
+
+
+def _ensure_mp3(wav_path: Path) -> Path:
+    """Convierte WAV→MP3 (192 kbps) si no existe y retorna la ruta del MP3.
+
+    El MP3 se guarda junto al WAV en la carpeta del job: la primera descarga
+    tarda unos segundos y las siguientes se sirven directamente del disco.
+    """
+
+    mp3_path = _mp3_path_for(wav_path)
+    if mp3_path.exists():
+        return mp3_path
+    if not wav_path.exists():
+        raise HTTPException(status_code=409, detail="El audio aún no está disponible.")
+    try:
+        audio = AudioSegment.from_file(wav_path)
+        audio.export(mp3_path, format="mp3", bitrate="192k")
+    except Exception as exc:
+        # Limpia restos de una conversión a medias para reintentar luego.
+        mp3_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"No se pudo convertir a MP3 (¿está instalado ffmpeg?): {exc}",
+        ) from exc
+    return mp3_path
 
 
 def _validate_qwen_options(
@@ -374,6 +406,18 @@ def create_app(
         if job.state is not JobState.DONE or not job.output_path or not job.output_path.exists():
             raise HTTPException(status_code=409, detail="El audio aún no está disponible.")
         return FileResponse(job.output_path, media_type="audio/wav", filename=job.output_path.name)
+
+    @app.get("/api/jobs/{job_id}/audio.mp3")
+    def get_audio_mp3(job_id: str) -> FileResponse:
+        """Descarga el audio como MP3 (convierte al vuelo y cachea en disco)."""
+        job = manager.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"Job no encontrado: {job_id}")
+        if job.state is not JobState.DONE or not job.output_path or not job.output_path.exists():
+            raise HTTPException(status_code=409, detail="El audio aún no está disponible.")
+        mp3_path = _ensure_mp3(job.output_path)
+        filename = mp3_path.name
+        return FileResponse(mp3_path, media_type="audio/mpeg", filename=filename)
 
     @app.delete("/api/jobs/{job_id}")
     def delete_job(job_id: str) -> dict:
