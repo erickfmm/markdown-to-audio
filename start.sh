@@ -8,6 +8,7 @@
 #
 # Variables (con defaults):
 #   HOST=0.0.0.0 PORT=5000 API_HOST=0.0.0.0 API_PORT=8000
+#   TTS_PROFILE=classic|kokoro|qwen|kokoro+qwen   (motores a instalar)
 set -euo pipefail
 
 MODE="${1:-local}"
@@ -16,6 +17,7 @@ HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-5000}"
 API_HOST="${API_HOST:-0.0.0.0}"
 API_PORT="${API_PORT:-8000}"
+TTS_PROFILE="${TTS_PROFILE:-classic}"
 
 RUN_DIR="${TMPDIR:-/tmp}/md-tts"
 PID_FILE="$RUN_DIR/backend.pid"
@@ -43,6 +45,25 @@ require_uv() {
   }
 }
 
+# uv sync según el perfil de motores:
+#   classic      -> kokoro + chatterbox (grupo por defecto)
+#   kokoro       -> solo kokoro
+#   qwen         -> solo qwen3-*
+#   kokoro+qwen  -> kokoro + qwen3-*
+# (chatterbox-tts y qwen-tts fijan transformers incompatibles: nunca juntos)
+sync_profile() {
+  case "$TTS_PROFILE" in
+    classic)      uv sync ;;
+    kokoro)       uv sync --no-default-groups --extra kokoro ;;
+    qwen)         uv sync --no-default-groups --extra qwen ;;
+    kokoro+qwen)  uv sync --no-default-groups --extra kokoro --extra qwen ;;
+    *)
+      echo "Error: TTS_PROFILE inválido: '$TTS_PROFILE'. Use classic|kokoro|qwen|kokoro+qwen." >&2
+      exit 1
+      ;;
+  esac
+}
+
 wait_port() {
   local host="$1" port="$2" tries="${3:-90}"
   for _ in $(seq 1 "$tries"); do
@@ -58,24 +79,17 @@ wait_port() {
 case "$MODE" in
   docker)
     echo ">> Modo Docker completo: GUI en http://localhost:${PORT} | API en http://localhost:${API_PORT}"
-    # TTS_PROFILE=qwen compila las imágenes con los motores Qwen3
-    if [[ "${TTS_PROFILE:-}" == "qwen" ]]; then
-      TTS_PROFILE=qwen compose up --build
-    else
-      compose up --build
-    fi
+    # El perfil se pasa como build-arg a las imágenes (classic|kokoro|qwen|kokoro+qwen)
+    TTS_PROFILE="$TTS_PROFILE" compose up --build
     ;;
 
   local)
     require_uv
-    echo ">> Modo local (uv): GUI en http://${HOST}:${PORT} | API embebida en el puerto ${API_PORT}"
-    # Perfil de motores: TTS_PROFILE=qwen usa los extras qwen (sin chatterbox).
-    if [[ "${TTS_PROFILE:-}" == "qwen" ]]; then
-      uv sync --no-default-groups --extra qwen
-    else
-      uv sync
-    fi
-    exec uv run md-tts-web \
+    echo ">> Modo local (uv): GUI en http://${HOST}:${PORT} | API embebida en el puerto ${API_PORT} (perfil: ${TTS_PROFILE})"
+    sync_profile
+    # --no-sync: uv run re-sincronizaría con el grupo por defecto (classic)
+    # y machacaría el perfil elegido arriba.
+    exec uv run --no-sync md-tts-web \
       --host "$HOST" \
       --port "$PORT" \
       --api-host 127.0.0.1 \
@@ -91,15 +105,12 @@ case "$MODE" in
       exit 1
     fi
 
-    echo ">> Modo híbrido: backend local (uv) + frontend Docker"
-    if [[ "${TTS_PROFILE:-}" == "qwen" ]]; then
-      uv sync --no-default-groups --extra qwen
-    else
-      uv sync
-    fi
+    echo ">> Modo híbrido: backend local (uv) + frontend Docker (perfil: ${TTS_PROFILE})"
+    sync_profile
 
     echo ">> Iniciando backend FastAPI en ${API_HOST}:${API_PORT} (log: $LOG_FILE)"
-    nohup uv run uvicorn md_tts.api.app:app \
+    # --no-sync: el perfil ya está sincronizado arriba (sync_profile).
+    nohup uv run --no-sync uvicorn md_tts.api.app:app \
       --host "$API_HOST" --port "$API_PORT" >"$LOG_FILE" 2>&1 &
     echo $! >"$PID_FILE"
 

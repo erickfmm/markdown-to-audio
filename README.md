@@ -162,6 +162,7 @@ With **uv** (recommended — used by `start.sh`):
 ```bash
 uv sync                                  # base + kokoro + chatterbox (as before)
 uv sync --no-default-groups --extra qwen # base + Qwen3-TTS (no chatterbox)
+uv sync --no-default-groups --extra kokoro --extra qwen # kokoro + Qwen3-TTS (no chatterbox)
 ```
 
 With **pip**:
@@ -172,7 +173,7 @@ python3 -m pip install -e .              # base engines
 python3 -m pip install 'md-tts[qwen]'    # + Qwen3-TTS engines (replaces chatterbox)
 ```
 
-> ⚠️ **`qwen3-*` and `chatterbox` cannot be installed together**: `qwen-tts` pins `transformers==4.57.3` while `chatterbox-tts` pins `transformers==4.46.3`/`5.2.0`. Engines unavailable in the current environment raise a clear `ImportError` at first use; the web UI still lists them but jobs will fail with that message. Choose the extra that matches your engines.
+> ⚠️ **`qwen3-*` and `chatterbox` cannot be installed together**: `qwen-tts` pins `transformers==4.57.3` while `chatterbox-tts` pins `transformers==4.46.3`/`5.2.0`. Engines unavailable in the current environment are listed by `/api/engines` with `"available": false` and shown in the web UI as disabled; submitting a job with one is rejected with a clear 400. Choose the extra that matches your engines.
 
 System dependencies on Debian/Ubuntu:
 
@@ -465,10 +466,17 @@ GPU: uncomment `gpus: all` on the backend service (requires the NVIDIA Container
 # classic profile (default): kokoro + chatterbox
 docker compose build
 
+# classic profile (default): kokoro + chatterbox
+docker compose build
+
 # qwen profile: qwen3-customvoice / qwen3-voicedesign / qwen3-clone
 docker compose build --build-arg TTS_PROFILE=qwen          # both services
 docker build --build-arg TTS_PROFILE=qwen -f docker/Dockerfile.backend -t md-tts-backend-qwen .
 docker build --build-arg TTS_PROFILE=qwen -t md-tts-qwen .  # CLI image
+
+# kokoro+qwen profile: kokoro + the Qwen3 engines (no chatterbox)
+docker compose build --build-arg TTS_PROFILE=kokoro+qwen
+docker build --build-arg TTS_PROFILE=kokoro+qwen -f docker/Dockerfile.backend -t md-tts-backend-full .
 ```
 
 ## `start.sh` reference
@@ -481,7 +489,7 @@ docker build --build-arg TTS_PROFILE=qwen -t md-tts-qwen .  # CLI image
 ./start.sh help
 ```
 
-Environment variables (all optional): `HOST` (default `127.0.0.1`, only `local`), `PORT` (GUI, default `5000`), `API_HOST` (default `0.0.0.0`, only `hybrid`), `API_PORT` (default `8000`), `TTS_PROFILE` (`qwen` → installs/exposes the Qwen3 engines instead of chatterbox; only `local`, `hybrid` and `docker`).
+Environment variables (all optional): `HOST` (default `127.0.0.1`, only `local`), `PORT` (GUI, default `5000`), `API_HOST` (default `0.0.0.0`, only `hybrid`), `API_PORT` (default `8000`), `TTS_PROFILE` (engine profile: `classic` = kokoro + chatterbox, `kokoro` = kokoro only, `qwen` = Qwen3 engines only, `kokoro+qwen` = both kokoro and Qwen3 — never chatterbox together with Qwen3; used by `local`, `hybrid` and `docker`).
 
 Hybrid-mode artifacts: the backend runs via `nohup uv run uvicorn md_tts.api.app:app`, with its PID in `$TMPDIR/md-tts/backend.pid` and logs in `$TMPDIR/md-tts/backend.log`. The script waits (up to 90 s) for the backend port to open before starting the frontend container.
 
@@ -494,7 +502,7 @@ Why hybrid? Model caches and downloads stay on the host (fast iteration, reusabl
 | `MD_TTS_API_URL` | Flask frontend | `http://127.0.0.1:8001` | Backend base URL for the `/api/*` proxy. Set explicitly by compose and `md-tts-web` (flag `--api-url` wins over the env var). |
 | `MD_TTS_JOBS_DIR` | FastAPI backend | `output_audio/web` | Root directory for job outputs (`<dir>/<job-id>/<name>.wav`). |
 | `MD_TTS_VOICE_REFS_DIR` | FastAPI backend | `output_audio/voice_refs` | Where uploaded reference voices (voice cloning) are stored as normalized WAV + JSON metadata. Defaults relative to `MD_TTS_JOBS_DIR` or, when `--jobs-dir` is passed to `md-tts-web`, `<jobs-dir>/../voice_refs`. |
-| `TTS_PROFILE` | `start.sh` | `classic` | Set to `qwen` to install/deploy the Qwen3 engines (`--extra qwen` / `--build-arg TTS_PROFILE=qwen`) instead of chatterbox-incompatible setups. |
+| `TTS_PROFILE` | `start.sh` | `classic` | Engine profile: `classic` (kokoro + chatterbox), `kokoro`, `qwen` (Qwen3 engines) or `kokoro+qwen` (kokoro + Qwen3). Chatterbox and Qwen3 can't coexist. |
 | `HOST` / `PORT` / `API_HOST` / `API_PORT` | `start.sh` | `127.0.0.1` / `5000` / `0.0.0.0` / `8000` | Ports and bind addresses per mode (see above). |
 | `HF_HOME` (optional) | engines | `~/.cache/huggingface` | Relocate the model cache (the compose backend mounts a volume at the default path). |
 

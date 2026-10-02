@@ -4,6 +4,8 @@
 # de transformers incompatibles entre sí, no pueden convivir en una imagen):
 #   docker build --build-arg TTS_PROFILE=classic -f docker/Dockerfile.backend .  (defecto: kokoro+chatterbox)
 #   docker build --build-arg TTS_PROFILE=qwen    -f docker/Dockerfile.backend .  (qwen3-*)
+#   docker build --build-arg TTS_PROFILE=kokoro -f docker/Dockerfile.backend .  (solo kokoro)
+#   docker build --build-arg TTS_PROFILE=kokoro+qwen -f docker/Dockerfile.backend .  (kokoro+qwen3)
 FROM python:3.11-slim
 
 ARG TTS_PROFILE=classic
@@ -53,11 +55,12 @@ COPY src /app/src
 #    paquetes ML DESPUÉS de `-e .` evita que pip degradarlos al resolver los
 #    rangos anchos del pyproject.
 RUN python3 -m pip install --no-cache-dir -e . && \
-    if [ "$TTS_PROFILE" = "qwen" ]; then \
-      python3 -m pip install --no-cache-dir "qwen-tts>=0.1.1" "onnxruntime<1.24"; \
-    else \
-      python3 -m pip install --no-cache-dir "kokoro>=0.9.2" "chatterbox-tts>=0.1.6"; \
-    fi
+    case "$TTS_PROFILE" in \
+      qwen)        python3 -m pip install --no-cache-dir "qwen-tts>=0.1.1" "onnxruntime<1.24";; \
+      kokoro)      python3 -m pip install --no-cache-dir "kokoro>=0.9.2";; \
+      kokoro+qwen) python3 -m pip install --no-cache-dir "kokoro>=0.9.2" "qwen-tts>=0.1.1" "onnxruntime<1.24";; \
+      *)           python3 -m pip install --no-cache-dir "kokoro>=0.9.2" "chatterbox-tts>=0.1.6";; \
+    esac
 
 # Audio generado por la API (montar como volumen para persistirlo)
 ENV MD_TTS_JOBS_DIR=/app/output_audio/web

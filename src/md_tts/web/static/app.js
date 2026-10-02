@@ -55,6 +55,7 @@ const I18N = {
     micError: "No se pudo acceder al micrófono (requiere localhost o HTTPS)",
     refRequired: "Sube o graba un audio de referencia para clonar la voz.",
     instructRequired: "Escribe una descripción de la voz para el diseño.",
+    engineUnavailable: "no disponible",
   },
   en: {
     newConversion: "New conversion",
@@ -106,6 +107,7 @@ const I18N = {
     micError: "Could not access the microphone (localhost or HTTPS required)",
     refRequired: "Upload or record a reference audio to clone the voice.",
     instructRequired: "Write a voice description for voice design.",
+    engineUnavailable: "not installed",
   },
 };
 
@@ -198,11 +200,19 @@ async function loadEngines() {
       engineMeta[engine.id] = engine;
       const option = document.createElement("option");
       option.value = engine.id;
-      option.textContent = engine.language_aware
-        ? engine.id
-        : `${engine.id} (⚠ ${t("language")})`;
+      option.disabled = engine.available === false;
+      let label = engine.id;
+      if (!engine.language_aware) label += ` (⚠ ${t("language")})`;
+      if (engine.available === false) label += ` — ${t("engineUnavailable")}`;
+      option.textContent = label;
       select.appendChild(option);
     });
+    // Si el engine seleccionado quedó deshabilitado, salta al primero disponible.
+    const selected = select.selectedOptions[0];
+    if (selected && selected.disabled) {
+      const firstOk = [...select.options].find((o) => !o.disabled);
+      if (firstOk) select.value = firstOk.value;
+    }
     updateQwenPanel();
   } catch (_) {
     /* la UI de salud ya informa del fallo */

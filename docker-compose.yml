@@ -3,9 +3,10 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
-      # Perfil de motores: TTS_PROFILE=qwen compila con los motores Qwen3
-      # (qwen-tts); classic (defecto) compila kokoro + chatterbox. Los dos
-      # no pueden convivir (fijan transformers incompatibles).
+      # Perfil de motores: classic (defecto: kokoro+chatterbox), kokoro,
+      # qwen (qwen3-*) o kokoro+qwen. chatterbox y qwen no pueden convivir
+      # (fijan transformers incompatibles); la GUI marca los engines no
+      # instalados como deshabilitados.
       args:
         TTS_PROFILE: ${TTS_PROFILE:-classic}
     image: md-tts-backend

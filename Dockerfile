@@ -1,10 +1,13 @@
 FROM python:3.11-slim
 
-# Perfil de motores: classic (defecto: kokoro + chatterbox) o qwen (qwen3-*).
+# Perfil de motores: classic (defecto: kokoro + chatterbox), qwen (qwen3-*),
+# kokoro (solo kokoro) o kokoro+qwen (kokoro + qwen3-*).
 # chatterbox-tts y qwen-tts fijan versiones de transformers incompatibles y no
 # pueden convivir en la misma imagen; elige el perfil al compilar:
-#   docker build -t md-tts .                                  (classic)
-#   docker build --build-arg TTS_PROFILE=qwen -t md-tts-qwen . (qwen)
+#   docker build -t md-tts .                                       (classic)
+#   docker build --build-arg TTS_PROFILE=qwen -t md-tts-qwen .     (qwen)
+#   docker build --build-arg TTS_PROFILE=kokoro -t md-tts-kokoro . (kokoro)
+#   docker build --build-arg TTS_PROFILE=kokoro+qwen -t md-tts-full . (kokoro+qwen)
 ARG TTS_PROFILE=classic
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -46,10 +49,11 @@ COPY src /app/src
 # qwen = qwen3-* engines (transformers 4.57). Installed after `-e .` so pip
 # settles each profile's exact pins without conflicts.
 RUN python3 -m pip install --no-cache-dir -e . && \
-    if [ "$TTS_PROFILE" = "qwen" ]; then \
-      python3 -m pip install --no-cache-dir "qwen-tts>=0.1.1" "onnxruntime<1.24"; \
-    else \
-      python3 -m pip install --no-cache-dir "kokoro>=0.9.2" "chatterbox-tts>=0.1.6"; \
-    fi
+    case "$TTS_PROFILE" in \
+      qwen)        python3 -m pip install --no-cache-dir "qwen-tts>=0.1.1" "onnxruntime<1.24";; \
+      kokoro)      python3 -m pip install --no-cache-dir "kokoro>=0.9.2";; \
+      kokoro+qwen) python3 -m pip install --no-cache-dir "kokoro>=0.9.2" "qwen-tts>=0.1.1" "onnxruntime<1.24";; \
+      *)           python3 -m pip install --no-cache-dir "kokoro>=0.9.2" "chatterbox-tts>=0.1.6";; \
+    esac
 
 ENTRYPOINT ["md-tts"]

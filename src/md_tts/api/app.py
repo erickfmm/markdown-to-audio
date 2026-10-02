@@ -17,6 +17,7 @@ from ..tts import (
     ENGINE_METADATA,
     ENGINE_REGISTRY,
     QWEN_SPEAKERS,
+    engine_available,
     resolve_qwen_model_id,
 )
 from .jobs import JobManager, JobOptions, JobState
@@ -160,6 +161,12 @@ def _parse_options(
             status_code=400,
             detail=f"Engine desconocido: {engine}. Opciones: {list(ENGINE_REGISTRY)}",
         )
+    if not engine_available(engine):
+        raise HTTPException(
+            status_code=400,
+            detail=f"El engine '{engine}' no está instalado en este servidor. "
+            "Consulte los engines disponibles en /api/engines.",
+        )
     if language not in ("es", "en"):
         raise HTTPException(status_code=400, detail=f"Idioma inválido: {language}. Use 'es' o 'en'.")
     _validate_device(device)
@@ -222,6 +229,7 @@ def create_app(
                 {
                     "id": name,
                     "language_aware": name in service.LANGUAGE_AWARE_ENGINES,
+                    "available": engine_available(name),
                     **meta,
                 }
             )

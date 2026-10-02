@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import importlib.util
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
@@ -423,6 +424,52 @@ ENGINE_REGISTRY = {
     "qwen3-voicedesign": Qwen3VoiceDesignEngine,
     "qwen3-clone": Qwen3VoiceCloneEngine,
 }
+
+#: Paquete de terceros que debe estar instalado para cada engine (chequeo de
+#: disponibilidad con importlib.util.find_spec, sin importar el paquete ML).
+#: Los engines del núcleo (mms, vibevoice) usan transformers, que es base.
+ENGINE_REQUIREMENTS = {
+    "mms": ["transformers", "torch"],
+    "kokoro": ["kokoro"],
+    "chatterbox": ["chatterbox"],
+    "vibevoice": ["transformers", "torch"],
+    "cosyvoice": ["cosyvoice"],
+    "qwen3-customvoice": ["qwen_tts", "onnxruntime"],
+    "qwen3-voicedesign": ["qwen_tts", "onnxruntime"],
+    "qwen3-clone": ["qwen_tts", "onnxruntime"],
+}
+
+
+def engine_available(name: str) -> bool:
+    """True si las dependencias del engine están instaladas.
+
+    Usa ``importlib.util.find_spec`` para no cargar los modelos/paquetes
+    pesados: los engines se instalan como extras (kokoro, qwen, ...) y el
+    registry es estático, así que la API/UI puede marcar los que faltan.
+    """
+    key = name.lower()
+    if key not in ENGINE_REQUIREMENTS:
+        return False
+    for module in ENGINE_REQUIREMENTS[key]:
+        try:
+            if importlib.util.find_spec(module) is None:
+                return False
+        except (ImportError, ValueError, ModuleNotFoundError):
+            return False
+    return True
+
+
+def missing_engine_requirements(name: str) -> list:
+    """Módulos que faltan para el engine (vacío si está disponible)."""
+    key = name.lower()
+    missing = []
+    for module in ENGINE_REQUIREMENTS.get(key, []):
+        try:
+            if importlib.util.find_spec(module) is None:
+                missing.append(module)
+        except (ImportError, ValueError, ModuleNotFoundError):
+            missing.append(module)
+    return missing
 
 #: Metadatos por engine para la API/UI (validación y opciones dinámicas).
 ENGINE_METADATA = {
